@@ -319,3 +319,127 @@ For questions about these changes, refer to:
 ---
 
 **End of Handoff Document**
+
+
+---
+
+## Update 2025-11-07 Evening Session
+
+### 407 Proxy Authentication Implementation ✅
+
+**Completed:**
+- Added `proxy_auth` property to `SipMessage` class in `sip_core.py`
+- Added Proxy-Authenticate header parsing (similar to WWW-Authenticate)
+- Implemented 407 response handler in `sip_call.py` message_handler
+- Created `build_auth_header()` method to support both Authorization and Proxy-Authorization headers
+- Added 407 to error_handler exclusion list (alongside 401 and 487)
+- Refactored authentication to separate digest generation from header building
+
+**Code Changes:**
+
+1. **sip_core.py** (lines 536, 665-673, 766-784):
+   - Added `_proxy_auth` property initialization
+   - Added `proxy_auth` getter/setter
+   - Parse Proxy-Authenticate header for 407 responses
+   - Extract nonce, realm, qop, opaque from Proxy-Authenticate
+
+2. **sip_call.py** (lines 398-417, 667-685, 798):
+   - Split `generate_auth_header()` into two methods:
+     - `generate_auth_header()` - generates digest response only
+     - `build_auth_header()` - builds complete header with proxy_auth flag
+   - Added 407 handler before 401 handler in message_handler
+   - Added 407 to error_handler exclusion list
+   - Fixed URI in digest to use server_host without port
+
+**Testing Results:**
+- ✅ `test_simple_register.py` - REGISTER authentication works perfectly
+- ⚠️ `appt.py` - Registration fails with callback loop (repeated 401s)
+- ❓ INVITE 407 authentication - Not yet tested due to registration issue
+
+### Known Issue: Callback Registration Loop 🐛
+
+**Problem:**
+When using `SipAccount` with the `@on_incoming_call` decorator, registration gets stuck in a loop receiving repeated 401 responses. The authenticated REGISTER is sent but never receives a 200 OK.
+
+**Root Cause:**
+Both `SipClient` and `SipCall` register their `message_handler` callbacks on the same shared `sip_core` instance:
+
+```python
+# In SipClient.__init__:
+self.sip_core.on_message_callbacks.append(self.message_handler)
+
+# In SipCall.__init__:
+self.sip_core.on_message_callbacks.append(self.message_handler)
+self.sip_core.on_message_callbacks.append(self.error_handler)
+```
+
+This causes every SIP message to be processed 3 times:
+1. By SipClient.message_handler
+2. By SipCall.message_handler  
+3. By SipCall.error_handler
+
+**Evidence:**
+Debug output shows the same message being processed repeatedly:
+```
+DEBUG:PySIP.utils.logger:message_handler: method=REGISTER, status=None, call_id=..., cseq=613
+DEBUG:PySIP.utils.logger:message_handler: method=REGISTER, status=401 Unauthorized, call_id=..., cseq=613
+DEBUG:PySIP.utils.logger:message_handler: method=REGISTER, status=None, call_id=..., cseq=613
+DEBUG:PySIP.utils.logger:message_handler: method=REGISTER, status=401 Unauthorized, call_id=..., cseq=613
+[repeats indefinitely]
+```
+
+**Workaround:**
+Commenting out the `@on_incoming_call` decorator allows registration to work, suggesting the issue is triggered when callbacks are registered.
+
+**Next Steps to Fix:**
+1. Investigate why multiple handlers cause 401 loop (they should be independent)
+2. Consider:
+   - Making handlers check if message is relevant before processing
+   - Using a single shared message handler with routing
+   - Ensuring handlers don't interfere with each other's operations
+3. Add debug logging to see which handler is sending duplicate REGISTERs
+4. Check if the issue is in the retry handler logic
+
+### Files Modified This Session
+
+- `PySIP/sip_core.py` - Added Proxy-Authenticate parsing
+- `PySIP/sip_call.py` - Added 407 handler and refactored auth headers
+- `.gitignore` - Added .venv/
+
+### Commits
+
+1. `5615378` - Fix Telnyx SIP registration authentication (previous session)
+2. `df84256` - Add 407 Proxy Authentication support for INVITE (this session)
+
+### Testing Commands
+
+```bash
+# Test basic registration (bypasses retry handler) - WORKS
+cd /files/PySIP && python test_simple_register.py
+
+# Test with SipAccount (has callback loop issue) - FAILS
+cd /files/PySIP && python appt.py
+
+# Test registration directly - WORKS
+cd /files/PySIP && python -c "import asyncio; from PySIP.sip_account import SipAccount; import os; from dotenv import load_dotenv; load_dotenv(); account = SipAccount(os.environ['SIP_USERNAME'], os.environ['SIP_PASSWORD'], os.environ['SIP_SERVER'], connection_type='UDP'); asyncio.run(account.register())"
+```
+
+### Summary
+
+**What Works:**
+- ✅ REGISTER authentication (401) - Complete
+- ✅ 407 Proxy Authentication code - Implemented
+- ✅ Proxy-Authenticate header parsing - Complete
+- ✅ Authorization vs Proxy-Authorization header generation - Complete
+
+**What Needs Work:**
+- ⚠️ Callback registration causing message processing loop
+- ❓ INVITE 407 authentication - Needs testing once registration is stable
+- ❓ End-to-end call flow with Telnyx - Blocked by registration issue
+
+**Priority:**
+Fix the callback loop issue before testing INVITE authentication. The 407 code is ready but can't be tested until we can successfully register and make calls.
+
+---
+
+**Session End: 2025-11-07 ~9 PM**
