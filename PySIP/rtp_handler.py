@@ -435,7 +435,7 @@ class RTPClient:
                         elif isinstance(output_q, queue.Queue):
                             output_q.put(decoded_frame)
 
-                time.sleep(0.01)
+                # time.sleep(0.01)  # Removed - only sleep on errors, not after every packet
 
             except BlockingIOError:
                 logger.log(logging.DEBUG, "RTP receive: BlockingIOError, no data available")
