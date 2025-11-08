@@ -337,7 +337,14 @@ class RTPClient:
                 except RuntimeError:
                     break
             
-            encoded_payload = self.__encoder.encode(payload)
+            # Check if audio stream has pre-encoded data (already in target codec format)
+            if audio_stream and hasattr(audio_stream, 'pre_encoded') and audio_stream.pre_encoded:
+                # Audio is already encoded (e.g., ulaw from OpenAI), use it directly
+                encoded_payload = payload
+                logger.log(logging.DEBUG, f"Using pre-encoded payload: {len(payload)} bytes")
+            else:
+                # Audio needs encoding (e.g., PCM16 to ulaw)
+                encoded_payload = self.__encoder.encode(payload)
             packet = RtpPacket(
                 payload_type=self.selected_codec,
                 payload=encoded_payload,
