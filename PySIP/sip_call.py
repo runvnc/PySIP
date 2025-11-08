@@ -1031,6 +1031,10 @@ class SipCall:
             _rtp_task = asyncio.create_task(self._rtp_session._start())
             self._rtp_session._rtp_task = _rtp_task
             self._register_callback("dtmf_handler", self._dtmf_handler.dtmf_callback)
+            
+            # Start frame monitor task if there are frame_monitor callbacks registered
+            if self._get_callbacks("frame_monitor"):
+                asyncio.create_task(self._rtp_session.frame_monitor())
             logger.log(logging.DEBUG, "Done spawned _rtp_task in the background")
 
     def on_frame_received(self, func):
