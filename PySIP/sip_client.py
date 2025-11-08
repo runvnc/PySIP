@@ -30,11 +30,13 @@ class SipClient:
     ):
         self.username = username
         try:
-            self.server = server.split(":")[0]
+            self.server_host = server.split(":")[0]
             self.port = server.split(":")[1]
         except IndexError:
+            self.server_host = server
             self.port = 5060
-        self.server = self.server + ":" + str(self.port)
+        # Keep server with port for backward compatibility
+        self.server = self.server_host + ":" + str(self.port)
 
         if password:
             self.password = password
@@ -229,9 +231,11 @@ class SipClient:
                 return
             nonce = received_message.nonce
             realm = received_message.realm
+            opaque = received_message.opaque
             cseq = self.register_counter.current()
             self.register_tags["cseq"] = cseq
-            uri = f"sip:{self.server}:{self.port};transport={self.CTS}"
+            # URI must include transport parameter
+            uri = f"sip:{self.server_host};transport={self.CTS}"
 
             # Check for qop in WWW-Authenticate header
             qop = received_message.qop
@@ -277,6 +281,10 @@ class SipClient:
 
             if qop:
                 auth_header += f', qop=auth, nc={nc}, cnonce="{cnonce}"'
+            
+            # Add opaque if present
+            if opaque:
+                auth_header += f', opaque="{opaque}"'
             auth_header += "\r\n"
 
             # Construct the complete REGISTER request with Authorization header
@@ -412,6 +420,11 @@ class SipClient:
         ):  # Filter only current call
             return  # These are just for extra check and not necessary
 
+        logger.log(
+            logging.DEBUG,
+            f"message_handler: method={msg.method}, status={msg.status}, call_id={msg.call_id}, cseq={msg.cseq}"
+        )
+
         await asyncio.sleep(0.001)
         if msg.status == SIPStatus(401) and msg.method == "REGISTER":
             # This is the case when we have to send a re-register
@@ -420,8 +433,15 @@ class SipClient:
 
         elif msg.status == SIPStatus(200) and msg.method == "REGISTER":
             # This is when we receive the response for the register
-            operation_id = f"REGISTER_{msg.call_id}_{msg.cseq}"
-            self.retry_handler.complete_operation(operation_id)
+            # Complete ANY pending REGISTER operation for this call_id
+            # This handles the case where CSeq was incremented during reregister
+            for op_id in list(self.retry_handler.pending_operations.keys()):
+                if op_id.startswith(f"REGISTER_{msg.call_id}_"):
+                    self.retry_handler.complete_operation(op_id)
+                    logger.log(
+                        logging.DEBUG,
+                        f"Completed operation {op_id} after receiving 200 OK"
+                    )
 
             # In case the response is of Un-register we set this
             if self.register_tags["type"] == "UNREGISTER":

@@ -81,7 +81,8 @@ class SipCore:
     def get_public_ip(self) -> str | None:
         try:
             external_ip = requests.get(
-                "https://api64.ipify.org?format=json", timeout=8
+                # Use api.ipify.org (not api64) to get IPv4 only
+                "https://api.ipify.org?format=json", timeout=8
             ).json()["ip"]
         except requests.exceptions.Timeout:
             external_ip = None
@@ -309,6 +310,7 @@ class SipCore:
                     return
                 try:
                     data = await asyncio.wait_for(self.udp_reader.read(4096), 0.5)
+                    logger.log(logging.DEBUG, f"UDP received {len(data)} bytes")
                 except asyncio.TimeoutError:
                     await asyncio.sleep(0.01)
                     continue  # this is neccesary to avoid blocking of checking
@@ -328,6 +330,7 @@ class SipCore:
             sip_messages = await asyncio.to_thread(self.extract_sip_messages, data)
 
             for sip_message_data in sip_messages:
+                logger.log(logging.DEBUG, f"Processing SIP message, {len(self.on_message_callbacks)} callbacks registered")
                 await self.send_to_callbacks(sip_message_data.decode())
             await asyncio.sleep(0.1)
 
@@ -531,6 +534,7 @@ class SipMessage:
         self._branch = None
         self._did = None
         self._qop = None
+        self._opaque = None
 
     @property
     def type(self):
@@ -652,6 +656,14 @@ class SipMessage:
     def qop(self, value):
         self._qop = value
 
+    @property
+    def opaque(self):
+        return self._opaque
+
+    @opaque.setter
+    def opaque(self, value):
+        self._opaque = value
+
     def parse(self):
         data = self.data.split("\r\n\r\n")
         self.headers_data = data[0]
@@ -731,7 +743,17 @@ class SipMessage:
                 if auth_header:
                     self.nonce = auth_header.split('nonce="')[1].split('"')[0]
                     self.realm = auth_header.split('realm="')[1].split('"')[0]
-                    self.qop = auth_header.split("qop=")[1].split('"')[1]
+                    # qop is optional - only parse if present
+                    try:
+                        self.qop = auth_header.split("qop=")[1].split('"')[1]
+                    except IndexError:
+                        self.qop = None
+                    # opaque is also optional
+                    try:
+                        self.opaque = auth_header.split('opaque="')[1].split('"')[0]
+                    except IndexError:
+                        self.opaque = None
+                        
                 # dialog_id
                 contact_header = self.get_header("Contact")
                 if contact_header:

@@ -148,4 +148,4 @@ class SipAccount:
             self.__sip_client._register_callback("incoming_call_cb", wrapper)
         else:
             self.__pending_callbacks.append(wrapper)
-        return
+        return func  # Return the original function, not None
