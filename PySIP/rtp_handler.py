@@ -303,6 +303,7 @@ class RTPClient:
             audio_stream = self.get_audio_stream()
             if not self.is_running.is_set():
                 break
+            logger.log(logging.DEBUG, f"RTP send loop: audio_stream={audio_stream is not None}, SEND_SILENCE={SEND_SILENCE}")
 
             if not audio_stream and not SEND_SILENCE:
                 time.sleep(0.02)
@@ -311,9 +312,11 @@ class RTPClient:
             try:
                 if audio_stream is None:
                     payload = self.generate_silence_frames()
+                    logger.log(logging.DEBUG, f"Generated silence frame: {len(payload)} bytes")
                 else:
                     payload = audio_stream.input_q.get_nowait()
             except queue.Empty:
+                logger.log(logging.DEBUG, "Audio queue empty, sleeping")
                 time.sleep(0.02)
                 continue
 
@@ -344,6 +347,7 @@ class RTPClient:
             try:
                 self.__rtp_socket.setblocking(True)
                 self.__rtp_socket.sendto(packet, (self.dst_ip, self.dst_port))
+                logger.log(logging.DEBUG, f"Sent RTP packet to {self.dst_ip}:{self.dst_port}, seq={self.__sequence_number}")
                 #logger.log(logging.DEBUG, f"Sent RTP Packet: Seq={self.__sequence_number}, Timestamp={self.__timestamp}")
                 self.__rtp_socket.setblocking(False)
             except OSError:
