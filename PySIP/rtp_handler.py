@@ -465,10 +465,11 @@ class RTPClient:
                 # check for registered callbacks
                 for cb in callbacks:
                     await cb(frame)
-                await asyncio.sleep(0.1)
+                # No sleep for S2S - process frames immediately for real-time audio
+                # await asyncio.sleep(0.1)
 
             except asyncio.QueueEmpty:
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.01)  # Short sleep only when queue is empty
                 continue
 
     def get_audio_stream(self):
