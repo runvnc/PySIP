@@ -128,7 +128,10 @@ class RTPClient:
             f"SERVER: {self.dst_ip}:{self.dst_port}"
         )
         self.__rtp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.__rtp_socket.bind((self.src_ip, self.src_port))
+        # Bind to 0.0.0.0 to receive on all interfaces (important for NAT/cloud servers)
+        # We still advertise src_ip in SDP, but listen on all interfaces
+        self.__rtp_socket.bind(('0.0.0.0', self.src_port))
+        logger.log(logging.INFO, f"RTP socket bound to 0.0.0.0:{self.src_port} (advertised as {self.src_ip}:{self.src_port})")
         self.__rtp_socket.setblocking(False)
         self.__rtp_socket_lock = threading.Lock()
 
