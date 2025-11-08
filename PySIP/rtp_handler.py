@@ -341,6 +341,7 @@ class RTPClient:
             try:
                 self.__rtp_socket.setblocking(True)
                 self.__rtp_socket.sendto(packet, (self.dst_ip, self.dst_port))
+                #logger.log(logging.DEBUG, f"Sent RTP Packet: Seq={self.__sequence_number}, Timestamp={self.__timestamp}")
                 self.__rtp_socket.setblocking(False)
             except OSError:
                 logger.log(logging.ERROR, "Failed to send RTP Packet", exc_info=True)
