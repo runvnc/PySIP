@@ -413,9 +413,19 @@ class RTPClient:
                 if encoded_frame:
                     if self.__amd_detector and not self.__amd_detector.amd_started.is_set():
                         self.__amd_detector.amd_started.set()
+                    
+                    # Send encoded (raw ulaw) data to frame_monitor for S2S
+                    if 'frame_monitor' in self._output_queues:
+                        try:
+                            loop.call_soon_threadsafe(self._output_queues['frame_monitor'].put_nowait, encoded_frame.data)
+                        except RuntimeError:
+                            pass
+                    
                     decoded_frame = self.__decoder.decode(encoded_frame.data)
                     logger.log(logging.DEBUG, f"RTP receive: decoded frame, {len(decoded_frame)} bytes, sending to {len(self._output_queues)} queues")
-                    for output_q in self._output_queues.values():
+                    for queue_name, output_q in self._output_queues.items():
+                        if queue_name == 'frame_monitor':  # Skip frame_monitor, already sent encoded data
+                            continue
                         if isinstance(output_q, asyncio.Queue):
                             # asyncio.run_coroutine_threadsafe(output_q.put(decoded_frame), loop)
                             try:
