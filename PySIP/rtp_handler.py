@@ -26,7 +26,7 @@ MAX_WAIT_FOR_STREAM = 40  # seconds
 RTP_HEADER_LENGTH = 12
 RTP_PORT_RANGE = range(10_000, 20_000)
 SEND_SILENCE = True # send silence frames when no stream
-USE_AMD_APP = True
+USE_AMD_APP = False  # Disabled for S2S mode - we need immediate audio passthrough
 DTMF_MODE = DTMFMode.RFC_2833
 
 
