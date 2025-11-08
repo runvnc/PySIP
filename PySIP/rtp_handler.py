@@ -371,7 +371,7 @@ class RTPClient:
                 break
             if self.__rtp_socket is None or self.__rtp_socket.fileno() < 0:
                 logger.log(logging.DEBUG, "RTP receive: socket is None or closed, breaking")
-                    break
+                break
 
             try: 
                 data = self.__rtp_socket.recv(4096)
