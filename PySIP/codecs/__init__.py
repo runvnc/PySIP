@@ -2,7 +2,7 @@ from .g711 import PcmaDecoder, PcmaEncoder, PcmuDecoder, PcmuEncoder
 from .codec_info import CodecInfo
 
 
-CODECS = [CodecInfo.PCMA, CodecInfo.PCMU, CodecInfo.EVENT]
+CODECS = [CodecInfo.PCMU, CodecInfo.PCMA, CodecInfo.EVENT]  # PCMU first for OpenAI compatibility
 
 
 def get_encoder(codec: CodecInfo):
