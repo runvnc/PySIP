@@ -289,9 +289,10 @@ class SipCore:
             if not self.udp_writer:
                 logger.log(logging.CRITICAL, "There is no UdpWriter, cant write!")
                 return
+            logger.log(logging.DEBUG, f"Sending UDP message:\n{msg}")
             await self.send_to_callbacks(msg)
             self.udp_writer.write(msg.encode())
-
+            
         else:
             if not self.writer:
                 logger.log(logging.CRITICAL, "There is no StreamWriter, can't write!")
@@ -336,6 +337,7 @@ class SipCore:
 
             for sip_message_data in sip_messages:
                 logger.log(logging.DEBUG, f"Processing SIP message, {len(self.on_message_callbacks)} callbacks registered")
+                logger.log(logging.DEBUG, f"SIP Message Data:\n{sip_message_data.decode()}")
                 await self.send_to_callbacks(sip_message_data.decode())
             await asyncio.sleep(0.1)
 

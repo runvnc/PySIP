@@ -66,6 +66,10 @@ class SipClient:
         self.my_private_ip = None
         self._callbacks: Dict[str, List[Callable]] = {}
         self.retry_handler = RetryHandler()
+        # Transaction management for registration
+        self._register_lock = asyncio.Lock()
+        self._pending_auth_nonce = None
+        self._last_401_time = 0
 
     async def run(self):
         register_task = None
@@ -234,11 +238,15 @@ class SipClient:
             unregister = True if self.register_tags["type"] == "UNREGISTER" else False
             if not received_message:
                 return
+            
             nonce = received_message.nonce
             realm = received_message.realm
             opaque = received_message.opaque
-            cseq = self.register_counter.current()
+            
+            # CRITICAL FIX: Increment CSeq for new transaction
+            cseq = next(self.register_counter)
             self.register_tags["cseq"] = cseq
+            
             # URI must include transport parameter
             uri = f"sip:{self.server_host};transport={self.CTS}"
 
@@ -246,6 +254,7 @@ class SipClient:
             qop = received_message.qop
             nc = None
             cnonce = None
+            
             auth_header = received_message.get_header("WWW-Authenticate")
             if auth_header and qop:
                 nc = "00000001"  # Initial nonce count
@@ -265,8 +274,14 @@ class SipClient:
             )
 
             # Adjust Via and Contact headers for public IP and port if available
-            my_public_ip = self.my_public_ip
-            ip = received_message.public_ip if not my_public_ip else my_public_ip
+            # CRITICAL FIX: Use consistent IP addressing
+            # Always prefer public IP once discovered to avoid load balancer confusion
+            if self.my_public_ip:
+                ip = self.my_public_ip
+            elif received_message.public_ip:
+                ip = received_message.public_ip
+            else:
+                ip = self.my_private_ip
             port = received_message.rport
             from_tag = self.register_tags["local_tag"]
             expires = ";expires=0" if unregister else ""
@@ -274,6 +289,9 @@ class SipClient:
                 f"Expires: {self.register_duration}\r\n" if not unregister else ""
             )
 
+            # CRITICAL FIX: Generate new branch ID for new transaction
+            new_branch = str(uuid.uuid4()).upper()
+            
             # Build Authorization header based on qop presence
             auth_header = (
                 f'Authorization: Digest username="{self.username}", '
@@ -295,9 +313,10 @@ class SipClient:
             # Construct the complete REGISTER request with Authorization header
             msg = (
                 f"REGISTER sip:{self.server};transport={self.CTS} SIP/2.0\r\n"
-                f"Via: SIP/2.0/{self.CTS} {ip}:{port};rport;branch={received_message.branch};alias\r\n"
+                f"Via: SIP/2.0/{self.CTS} {ip}:{port};rport;branch={new_branch};alias\r\n"
                 f"Max-Forwards: 70\r\n"
-                f"From: <sip:{self.caller_id}@{self.server}>;tag={from_tag}\r\n"
+                # REGISTER must use username, not caller_id (phone number)
+                f"From: <sip:{self.username}@{self.server}>;tag={from_tag}\r\n"
                 f"To: <sip:{self.username}@{self.server}>\r\n"
                 f"Call-ID: {call_id}\r\n"
                 f"CSeq: {cseq} REGISTER\r\n"
@@ -308,7 +327,9 @@ class SipClient:
             )
         else:
             # Handling unauthenticated REGISTER request
-            ip = self.my_private_ip
+            # CRITICAL FIX: Use public IP if available for consistency
+            ip = self.my_public_ip if self.my_public_ip else self.my_private_ip
+            
             port = self.port
             _, my_public_port = self.sip_core.get_extra_info("sockname")
             if not self.register_tags["local_tag"]:
@@ -326,7 +347,8 @@ class SipClient:
                 f"REGISTER sip:{self.server};transport={self.CTS} SIP/2.0\r\n"
                 f"Via: SIP/2.0/{self.CTS} {ip}:{my_public_port};rport;branch={branch_id};alias\r\n"
                 f"Max-Forwards: 70\r\n"
-                f"From: <sip:{self.caller_id}@{self.server}>;tag={self.register_tags['local_tag']}\r\n"
+                # REGISTER must use username, not caller_id (phone number)
+                f"From: <sip:{self.username}@{self.server}>;tag={self.register_tags['local_tag']}\r\n"
                 f"To: <sip:{self.username}@{self.server}>\r\n"
                 f"Call-ID: {call_id}\r\n"
                 f"CSeq: {cseq} REGISTER\r\n"
@@ -429,19 +451,50 @@ class SipClient:
             logging.DEBUG,
             f"message_handler: method={msg.method}, status={msg.status}, call_id={msg.call_id}, cseq={msg.cseq}"
         )
+        logger.log(logging.DEBUG, f"Full SIP Message:\n{str(msg.data)}")
 
-        await asyncio.sleep(0.001)
         if msg.status == SIPStatus(401) and msg.method == "REGISTER":
-            # This is the case when we have to send a re-register
-            # Add delay to avoid hammering the server
-            await asyncio.sleep(0.5)
-            await self.reregister(True, msg)
-            logger.log(logging.DEBUG, "Register message has been sent to the server")
+            # CRITICAL FIX: Use lock to prevent multiple simultaneous auth attempts
+            # This prevents the race condition where multiple 401s from different servers
+            # trigger multiple reregister attempts with the same CSeq/branch
+            async with self._register_lock:
+                import time
+                current_time = time.time()
+                
+                # Debounce: ignore 401s that arrive within 100ms of each other
+                if current_time - self._last_401_time < 0.1:
+                    logger.log(
+                        logging.DEBUG,
+                        f"Ignoring duplicate 401 (nonce={msg.nonce[:20]}...) - too soon after previous"
+                    )
+                    return
+                
+                # Only process if this is a new nonce (different server or new challenge)
+                if msg.nonce == self._pending_auth_nonce:
+                    logger.log(
+                        logging.DEBUG,
+                        f"Ignoring duplicate 401 with same nonce={msg.nonce[:20]}..."
+                    )
+                    return
+                
+                # This is a new authentication challenge
+                self._pending_auth_nonce = msg.nonce
+                self._last_401_time = current_time
+                
+                logger.log(
+                    logging.DEBUG,
+                    f"Processing 401 with nonce={msg.nonce[:20]}... from server {msg.get_header('Server')}"
+                )
+                
+                await self.reregister(True, msg)
+                logger.log(logging.DEBUG, "Register message has been sent to the server")
 
         elif msg.status == SIPStatus(200) and msg.method == "REGISTER":
+            # Clear pending auth state on success
+            self._pending_auth_nonce = None
+            
             # This is when we receive the response for the register
             # Complete ANY pending REGISTER operation for this call_id
-            # This handles the case where CSeq was incremented during reregister
             for op_id in list(self.retry_handler.pending_operations.keys()):
                 if op_id.startswith(f"REGISTER_{msg.call_id}_"):
                     self.retry_handler.complete_operation(op_id)

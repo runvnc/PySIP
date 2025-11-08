@@ -91,6 +91,9 @@ class SipCall:
         self.dialogue = SipDialogue(self.call_id, self.sip_core.generate_tag(), "")
         self.call_state = CallState.INITIALIZING
         self.call_response_future: Optional[asyncio.Future] = None
+        # Track nonce and nonce count for proper authentication
+        self._current_nonce = None
+        self._nonce_count = 0
 
     async def start(self):
         self._refer_future = asyncio.Future()
@@ -345,19 +348,22 @@ class SipCall:
 
     def generate_invite_message(self, auth=False, received_message=None):
         _, local_port = self.sip_core.get_extra_info("sockname")
-        local_ip = self.my_public_ip  # Corrected the typo from 'puplic' to 'public'
+        # Use private IP like Baresip does, not public IP
+        local_ip = self.my_private_ip
 
         if auth and received_message:
             # Handling INVITE with authentication
             nonce, realm, ip, port, qop, nc, cnonce = self.extract_auth_details(received_message)
             new_cseq = next(self.cseq_counter)
-            # URI for digest calculation should NOT include port or callee
-            digest_uri = f"sip:{self.server};transport={self.CTS}"
+            # URI for digest calculation should match the Request-URI format
+            # Strip + prefix from callee for digest URI to match Baresip
+            callee_no_plus = self.callee.lstrip('+')
+            digest_uri = f"sip:{callee_no_plus}@{self.server};transport={self.CTS.lower()}"
             response = self.generate_auth_header("INVITE", digest_uri, nonce, realm, qop, nc, cnonce)
-            # Full URI for the header (not used in digest)
-            full_uri = f"sip:{self.callee}@{self.server}:{self.port};transport={self.CTS}"
+            # Request-URI should also not have + prefix
+            request_uri = f"sip:{callee_no_plus}@{self.server};transport={self.CTS.lower()}"
             auth_header = self.build_auth_header(
-                full_uri, nonce, realm, response, received_message.opaque, qop, nc, cnonce, received_message.proxy_auth)
+                request_uri, nonce, realm, response, received_message.opaque, qop, nc, cnonce, received_message.proxy_auth)
             return self.construct_invite_message(
                 local_ip, local_port, new_cseq, auth_header, received_message
             )
@@ -375,13 +381,24 @@ class SipCall:
         port = received_message.rport
         
         qop = received_message.qop
-        nc = None
-        cnonce = None
+        
+        # CRITICAL FIX: Proper nonce count handling
+        # If this is a new nonce, reset the counter
+        if nonce != self._current_nonce:
+            self._current_nonce = nonce
+            self._nonce_count = 0
+        
+        # Increment nonce count for this nonce
+        self._nonce_count += 1
+        
+        # Format nc as 8-digit hex string
+        nc = f"{self._nonce_count:08x}"
+        
+        # Generate a new cnonce for each request
+        cnonce = ''.join(random.choices('0123456789abcdef', k=16))
+        
         # Check for either WWW-Authenticate (401) or Proxy-Authenticate (407)
         auth_header = received_message.get_header('WWW-Authenticate') or received_message.get_header('Proxy-Authenticate')
-        if qop:
-            nc = "00000001"  # Initial nonce count
-            cnonce = ''.join(random.choices('0123456789abcdef', k=16))  # Random cnonce
         
         return nonce, realm, ip, port, qop, nc, cnonce
 
@@ -440,13 +457,16 @@ class SipCall:
         branch_id = self.sip_core.gen_branch()
         transaction = self.dialogue.add_transaction(branch_id, "INVITE")
         
+        # Strip + prefix from callee to match Baresip format
+        callee_no_plus = self.callee.lstrip('+')
+        
         # If we have a received message but no auth_header, we need to generate one
         if received_message and not auth_header:
             nonce, realm, ip, port, qop, nc, cnonce = self.extract_auth_details(received_message)
-            uri = f"sip:{self.callee}@{self.server}:{self.port};transport={self.CTS}"
+            uri = f"sip:{callee_no_plus}@{self.server};transport={self.CTS.lower()}"
             response = self.generate_auth_header(
                 method="INVITE",
-                uri=f"sip:{self.server};transport={self.CTS}",
+                uri=uri,
                 nonce=nonce,
                 realm=realm,
                 qop=qop,
@@ -466,12 +486,12 @@ class SipCall:
             )
         
         # Request-URI should not include port and use lowercase transport
-        request_uri = f"sip:{self.callee}@{self.server};transport={self.CTS.lower()}"
+        request_uri = f"sip:{callee_no_plus}@{self.server};transport={self.CTS.lower()}"
         msg = (
             f"INVITE {request_uri} SIP/2.0\r\n"
             f"Via: SIP/2.0/{self.CTS} {ip}:{port};rport;branch={branch_id};alias\r\n"
             f"Max-Forwards: 70\r\n"
-            f"From: <sip:{self.caller_id}@{self.server}>;tag={tag}\r\n"
+            f"From: <sip:{self.username}@{self.server}>;tag={tag}\r\n"
             f"To: <{request_uri}>\r\n"
             f"Call-ID: {call_id}\r\n"
             f"CSeq: {transaction.cseq} INVITE\r\n"
