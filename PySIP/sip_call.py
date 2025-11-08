@@ -91,9 +91,12 @@ class SipCall:
         self.dialogue = SipDialogue(self.call_id, self.sip_core.generate_tag(), "")
         self.call_state = CallState.INITIALIZING
         self.call_response_future: Optional[asyncio.Future] = None
-        # Track nonce and nonce count for proper authentication
+        # Track nonce and nonce count for proper authentication - FIXED
         self._current_nonce = None
         self._nonce_count = 0
+        self._auth_in_progress = False  # Prevent multiple auth attempts
+        self._last_auth_cseq = None  # Track which INVITE we authenticated
+        self._preauth_enabled = False  # Set to True to pre-authenticate initial INVITE
 
     async def start(self):
         self._refer_future = asyncio.Future()
@@ -346,11 +349,52 @@ class SipCall:
         sdp = SipMessage.parse_sdp(SipMessage.sdp_to_dict(sdp))
         self.dialogue._local_session_info = sdp
 
+    def enable_preauth(self, realm=None, nonce=None):
+        """
+        Enable pre-authentication for the initial INVITE.
+        If realm and nonce are provided, they will be used.
+        Otherwise, the system will use cached values from previous calls.
+        This avoids the 407 challenge round-trip.
+        
+        Args:
+            realm: Optional SIP realm (e.g., 'sip.telnyx.com')
+            nonce: Optional nonce from a previous auth challenge
+        """
+        self._preauth_enabled = True
+        if realm:
+            self._preauth_realm = realm
+        if nonce:
+            self._current_nonce = nonce
+            self._nonce_count = 0
+    
     def generate_invite_message(self, auth=False, received_message=None):
         _, local_port = self.sip_core.get_extra_info("sockname")
-        # Use private IP like Baresip does, not public IP
-        local_ip = self.my_private_ip
+        # FIXED: Use public IP for SDP to avoid NAT issues
+        # The Via header will use private IP, but SDP needs public IP
+        # so Telnyx can send RTP back to us
+        local_ip = self.my_private_ip  # For Via header
+        sdp_ip = self.my_public_ip or self.my_private_ip  # For SDP
 
+        # Update local session info to use public IP
+        if self.dialogue._local_session_info and sdp_ip:
+            self.dialogue._local_session_info.ip_address = sdp_ip
+        
+        # Check if we should pre-authenticate the initial INVITE
+        if self._preauth_enabled and not auth and not received_message:
+            # Generate initial INVITE with pre-auth
+            # This requires a cached nonce from a previous call or REGISTER
+            if hasattr(self, '_preauth_realm') and self._current_nonce:
+                logger.log(logging.DEBUG, "Pre-authenticating initial INVITE")
+                # Create a minimal received_message-like object for auth
+                class PreAuthMsg:
+                    def __init__(self, realm, nonce):
+                        self.realm = realm
+                        self.nonce = nonce
+                        self.qop = 'auth'
+                        self.opaque = None
+                        self.proxy_auth = True
+                return self.generate_invite_message(auth=True, received_message=PreAuthMsg(self._preauth_realm, self._current_nonce))
+        
         if auth and received_message:
             # Handling INVITE with authentication
             nonce, realm, ip, port, qop, nc, cnonce = self.extract_auth_details(received_message)
@@ -386,10 +430,10 @@ class SipCall:
         # If this is a new nonce, reset the counter
         if nonce != self._current_nonce:
             self._current_nonce = nonce
-            self._nonce_count = 0
-        
-        # Increment nonce count for this nonce
-        self._nonce_count += 1
+            self._nonce_count = 1  # Start at 1, not 0
+        else:
+            # Same nonce, increment count
+            self._nonce_count += 1
         
         # Format nc as 8-digit hex string
         nc = f"{self._nonce_count:08x}"
@@ -702,25 +746,51 @@ class SipCall:
             return
 
         if msg.status == SIPStatus(407) and msg.method == "INVITE":
-            # Handling 407 Proxy Authentication Required
+            # FIXED: Handling 407 Proxy Authentication Required
+            # Check if we're already handling auth for this or a newer transaction
+            if self._auth_in_progress:
+                logger.log(logging.DEBUG, "Auth already in progress, ignoring duplicate 407")
+                return
+                
+            # Check if this 407 is for an old transaction we already handled
+            if self._last_auth_cseq and msg.cseq <= self._last_auth_cseq:
+                logger.log(logging.DEBUG, f"Ignoring 407 for old transaction (CSeq {msg.cseq} <= {self._last_auth_cseq})")
+                return
+            
             self.dialogue.remote_tag = msg.to_tag
             transaction = self.dialogue.find_transaction(msg.branch)
             if not transaction:
+                logger.log(logging.WARNING, "Received 407 for unknown transaction")
                 return
+                
             ack_message = self.ack_generator(transaction)
             await self.sip_core.send(ack_message)
 
             if self.dialogue.auth_retry_count > self.dialogue.AUTH_RETRY_MAX:
                 await self.stop("Unable to authenticate with proxy, check details")
                 return
-            # Then send reinvite with Proxy-Authorization
+                
+            # Mark auth in progress and track this CSeq
+            self._auth_in_progress = True
+            self._last_auth_cseq = transaction.cseq
+            
+            # Send reinvite with Proxy-Authorization
             await self.reinvite(True, msg)
             await self.update_call_state(CallState.DIALING)
             self.dialogue.auth_retry_count += 1
+            self._auth_in_progress = False
             logger.log(logging.DEBUG, "Sent INVITE request with Proxy-Authorization to the server")
 
         if msg.status == SIPStatus(401) and msg.method == "INVITE":
-            # Handling the auth of the invite
+            # FIXED: Handling 401 Authentication Required
+            if self._auth_in_progress:
+                logger.log(logging.DEBUG, "Auth already in progress, ignoring duplicate 401")
+                return
+                
+            if self._last_auth_cseq and msg.cseq <= self._last_auth_cseq:
+                logger.log(logging.DEBUG, f"Ignoring 401 for old transaction (CSeq {msg.cseq} <= {self._last_auth_cseq})")
+                return
+            
             self.dialogue.remote_tag = msg.to_tag
             transaction = self.dialogue.find_transaction(msg.branch)
             if not transaction:
@@ -731,10 +801,16 @@ class SipCall:
             if self.dialogue.auth_retry_count > self.dialogue.AUTH_RETRY_MAX:
                 await self.stop("Unable to authenticate, check details")
                 return
-            # Then send reinvite with Authorization
+                
+            # Mark auth in progress and track this CSeq
+            self._auth_in_progress = True
+            self._last_auth_cseq = transaction.cseq
+            
+            # Send reinvite with Authorization
             await self.reinvite(True, msg)
             await self.update_call_state(CallState.DIALING)
             self.dialogue.auth_retry_count += 1
+            self._auth_in_progress = False
             logger.log(logging.DEBUG, "Sent INVITE request to the server")
 
         elif (
