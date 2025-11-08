@@ -465,15 +465,18 @@ class SipCall:
                 proxy_auth=received_message.proxy_auth
             )
         
+        # Request-URI should not include port and use lowercase transport
+        request_uri = f"sip:{self.callee}@{self.server};transport={self.CTS.lower()}"
         msg = (
-            f"INVITE sip:{self.callee}@{self.server}:{self.port};transport={self.CTS} SIP/2.0\r\n"
+            f"INVITE {request_uri} SIP/2.0\r\n"
             f"Via: SIP/2.0/{self.CTS} {ip}:{port};rport;branch={branch_id};alias\r\n"
             f"Max-Forwards: 70\r\n"
             f"From: <sip:{self.caller_id}@{self.server}>;tag={tag}\r\n"
-            f"To: sip:{self.callee}@{self.server}\r\n"
+            f"To: <{request_uri}>\r\n"
             f"Call-ID: {call_id}\r\n"
             f"CSeq: {transaction.cseq} INVITE\r\n"
-            f"Contact: <sip:{self.username}@{ip}:{port};transport={self.CTS}>;expires=3600\r\n"
+            # Contact header should not have transport or expires for INVITE
+            f"Contact: <sip:{self.username}@{ip}:{port}>\r\n"
             f"Allow: {', '.join(SIPCompatibleMethods)}\r\n"
             "Supported: replaces, timer\r\n"
             "Content-Type: application/sdp\r\n"

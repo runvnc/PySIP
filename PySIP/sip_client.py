@@ -433,6 +433,8 @@ class SipClient:
         await asyncio.sleep(0.001)
         if msg.status == SIPStatus(401) and msg.method == "REGISTER":
             # This is the case when we have to send a re-register
+            # Add delay to avoid hammering the server
+            await asyncio.sleep(0.5)
             await self.reregister(True, msg)
             logger.log(logging.DEBUG, "Register message has been sent to the server")
 
