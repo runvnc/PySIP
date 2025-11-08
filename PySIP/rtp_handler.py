@@ -367,16 +367,20 @@ class RTPClient:
     def receive_sync(self, loop):
         while True:
             if not self.is_running.is_set():
+                logger.log(logging.DEBUG, "RTP receive: is_running is False, breaking")
                 break
             if self.__rtp_socket is None or self.__rtp_socket.fileno() < 0:
+                logger.log(logging.DEBUG, "RTP receive: socket is None or closed, breaking")
                     break
 
             try: 
                 data = self.__rtp_socket.recv(4096)
+                logger.log(logging.DEBUG, f"RTP receive: got {len(data)} bytes")
                 if data is None:
                     break
 
                 packet = RtpPacket.parse(data)
+                logger.log(logging.DEBUG, f"RTP receive: parsed packet, payload_type={packet.payload_type}")
                 if packet.payload_type == CodecInfo.EVENT:
                     # handle rfc 2833 
                     if DTMF_MODE is DTMFMode.RFC_2833:
@@ -396,10 +400,12 @@ class RTPClient:
 
                 encoded_frame = self.__jitter_buffer.add(packet)
                 # if we have enough encoded buffer then decode
+                logger.log(logging.DEBUG, f"RTP receive: jitter buffer returned frame={encoded_frame is not None}")
                 if encoded_frame:
                     if self.__amd_detector and not self.__amd_detector.amd_started.is_set():
                         self.__amd_detector.amd_started.set()
                     decoded_frame = self.__decoder.decode(encoded_frame.data)
+                    logger.log(logging.DEBUG, f"RTP receive: decoded frame, {len(decoded_frame)} bytes, sending to {len(self._output_queues)} queues")
                     for output_q in self._output_queues.values():
                         if isinstance(output_q, asyncio.Queue):
                             # asyncio.run_coroutine_threadsafe(output_q.put(decoded_frame), loop)
