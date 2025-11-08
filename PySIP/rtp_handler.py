@@ -365,6 +365,7 @@ class RTPClient:
         logger.log(logging.DEBUG, "Sender thread has been successfully closed") 
 
     def receive_sync(self, loop):
+        logger.log(logging.INFO, "RTP receive thread started")
         while True:
             if not self.is_running.is_set():
                 logger.log(logging.DEBUG, "RTP receive: is_running is False, breaking")
@@ -419,12 +420,14 @@ class RTPClient:
                 time.sleep(0.01)
 
             except BlockingIOError:
+                logger.log(logging.DEBUG, "RTP receive: BlockingIOError, no data available")
                 time.sleep(0.01)
             except OSError:
+                logger.log(logging.WARNING, "RTP receive: OSError", exc_info=True)
                 time.sleep(0.01)
                 pass
 
-        logger.log(logging.DEBUG, "Receiver socket successfully closed") 
+        logger.log(logging.INFO, "Receiver socket successfully closed") 
 
     async def frame_monitor(self):
         # first add stream queue to the output _output_queues
