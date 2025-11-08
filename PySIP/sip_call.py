@@ -351,8 +351,13 @@ class SipCall:
             # Handling INVITE with authentication
             nonce, realm, ip, port, qop, nc, cnonce = self.extract_auth_details(received_message)
             new_cseq = next(self.cseq_counter)
-            uri = f"sip:{self.callee}@{self.server}:{self.port};transport={self.CTS}"
-            auth_header = self.generate_auth_header("INVITE", uri, nonce, realm, qop, nc, cnonce)
+            # URI for digest calculation should NOT include port or callee
+            digest_uri = f"sip:{self.server};transport={self.CTS}"
+            response = self.generate_auth_header("INVITE", digest_uri, nonce, realm, qop, nc, cnonce)
+            # Full URI for the header (not used in digest)
+            full_uri = f"sip:{self.callee}@{self.server}:{self.port};transport={self.CTS}"
+            auth_header = self.build_auth_header(
+                full_uri, nonce, realm, response, received_message.opaque, qop, nc, cnonce, received_message.proxy_auth)
             return self.construct_invite_message(
                 local_ip, local_port, new_cseq, auth_header, received_message
             )
@@ -372,8 +377,9 @@ class SipCall:
         qop = received_message.qop
         nc = None
         cnonce = None
-        auth_header = received_message.get_header('WWW-Authenticate')
-        if auth_header and qop:
+        # Check for either WWW-Authenticate (401) or Proxy-Authenticate (407)
+        auth_header = received_message.get_header('WWW-Authenticate') or received_message.get_header('Proxy-Authenticate')
+        if qop:
             nc = "00000001"  # Initial nonce count
             cnonce = ''.join(random.choices('0123456789abcdef', k=16))  # Random cnonce
         
@@ -398,12 +404,17 @@ class SipCall:
         server_host = self.server
         header_name = "Proxy-Authorization" if proxy_auth else "Authorization"
         
+        # Remove port from URI if present (Telnyx doesn't want port in the header URI)
+        uri_without_port = uri.replace(f":{self.port}", "")
+        # Use lowercase transport to match Baresip format
+        uri_without_port = uri_without_port.replace(";transport=UDP", ";transport=udp")
+        
         # Build the header - use server_host without port in URI
         auth_header = (
             f'{header_name}: Digest username="{self.username}", '
             f'realm="{realm}", '
             f'nonce="{nonce}", '
-            f'uri="sip:{server_host};transport={self.CTS}", '
+            f'uri="{uri_without_port}", '
             f'response="{response}", '
             f'algorithm=MD5'
         )

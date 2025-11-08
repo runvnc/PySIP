@@ -443,3 +443,122 @@ Fix the callback loop issue before testing INVITE authentication. The 407 code i
 ---
 
 **Session End: 2025-11-07 ~9 PM**
+
+
+---
+
+## Update 2025-11-07 Late Evening Session
+
+### 407 Proxy Authentication - FIXED! ✅
+
+**Root Causes Identified and Fixed:**
+
+1. **Wrong URI in digest calculation** (Line 355)
+   - Was using: `sip:16822625850@sip.telnyx.com:5060;transport=UDP`
+   - Should be: `sip:sip.telnyx.com;transport=UDP`
+   - Fixed by using separate `digest_uri` for calculation
+
+2. **Wrong URI in Proxy-Authorization header** (Line 407)
+   - Was including port: `sip:16822625850@sip.telnyx.com:5060;transport=UDP`
+   - Should be: `sip:16822625850@sip.telnyx.com;transport=udp`
+   - Fixed by removing port and using lowercase transport
+
+3. **Missing nc and cnonce for qop=auth** (Line 376) - **CRITICAL BUG**
+   - Was only checking `WWW-Authenticate` header for 401 responses
+   - For 407 responses, need to check `Proxy-Authenticate` header
+   - When qop present but header not found, nc and cnonce stayed as `None`
+   - This caused literal string "None" to be sent in header: `nc=None, cnonce="None"`
+   - Fixed by checking for EITHER header type
+
+**Code Changes:**
+
+1. **sip_call.py** (Line 352-361):
+```python
+# OLD (broken):
+uri = f"sip:{self.callee}@{self.server}:{self.port};transport={self.CTS}"
+auth_header = self.generate_auth_header("INVITE", uri, nonce, realm, qop, nc, cnonce)
+
+# NEW (fixed):
+digest_uri = f"sip:{self.server};transport={self.CTS}"
+response = self.generate_auth_header("INVITE", digest_uri, nonce, realm, qop, nc, cnonce)
+full_uri = f"sip:{self.callee}@{self.server}:{self.port};transport={self.CTS}"
+auth_header = self.build_auth_header(
+    full_uri, nonce, realm, response, received_message.opaque, qop, nc, cnonce, received_message.proxy_auth)
+```
+
+2. **sip_call.py** (Line 401-415):
+```python
+# Remove port and use lowercase transport
+uri_without_port = uri.replace(f":{self.port}", "")
+uri_without_port = uri_without_port.replace(";transport=UDP", ";transport=udp")
+```
+
+3. **sip_call.py** (Line 373-380) - **THE CRITICAL FIX**:
+```python
+# OLD (broken):
+auth_header = received_message.get_header('WWW-Authenticate')
+if auth_header and qop:
+    nc = "00000001"
+    cnonce = ''.join(random.choices('0123456789abcdef', k=16))
+
+# NEW (fixed):
+auth_header = received_message.get_header('WWW-Authenticate') or received_message.get_header('Proxy-Authenticate')
+if qop:
+    nc = "00000001"
+    cnonce = ''.join(random.choices('0123456789abcdef', k=16))
+```
+
+**Race Condition Fix:**
+
+4. **sip_core.py** (Line 300-306):
+```python
+# Added delay before setting is_receiving flag to ensure socket is ready
+if not self.is_receiving.is_set():
+    await asyncio.sleep(0.1)
+    self.is_receiving.set()
+```
+
+**Testing Results:**
+
+✅ **REGISTER authentication** - Works (occasional timeout on first attempt due to race condition)
+✅ **407 Proxy Authentication** - WORKS! No more 407 loop
+✅ **INVITE with Proxy-Authorization** - Successfully authenticates
+⚠️ **Call completion** - Now getting "Forbidden/Invalid" error (different issue, not auth related)
+
+**Comparison with Baresip (working example):**
+
+```
+Baresip:
+Proxy-Authorization: Digest username="userjason43702", realm="sip.telnyx.com", 
+  nonce="...", uri="sip:16822625850@sip.telnyx.com;transport=udp", 
+  response="...", opaque="...", cnonce="f25e13c097695ffc", qop=auth, nc=00000001
+
+PySIP (before fix):
+Proxy-Authorization: Digest username="userjason43702", realm="sip.telnyx.com", 
+  nonce="...", uri="sip:16822625850@sip.telnyx.com:5060;transport=UDP", 
+  response="...", algorithm=MD5, qop=auth, nc=None, cnonce="None", opaque="..."
+  ^^^ PORT INCLUDED ^^^                    ^^^ UPPERCASE ^^^        ^^^ LITERAL "None" ^^^
+
+PySIP (after fix):
+Proxy-Authorization: Digest username="userjason43702", realm="sip.telnyx.com", 
+  nonce="...", uri="sip:16822625850@sip.telnyx.com;transport=udp", 
+  response="...", algorithm=MD5, qop=auth, nc=00000001, cnonce="a1b2c3d4e5f6...", opaque="..."
+```
+
+**Key Learnings:**
+
+1. Telnyx requires exact URI format matching (no port, lowercase transport)
+2. When qop=auth is present, nc and cnonce are REQUIRED (not optional)
+3. Must check for BOTH WWW-Authenticate (401) and Proxy-Authenticate (407) headers
+4. The literal string "None" in authentication headers causes silent failures
+5. Packet captures are essential for debugging SIP authentication issues
+
+**Next Steps:**
+
+1. Investigate "Forbidden/Invalid" error (likely number format or permissions)
+2. Further optimize race condition fix (0.1s delay works but could be improved)
+3. Test end-to-end call flow with audio
+
+---
+
+**Session End: 2025-11-07 ~9:45 PM**

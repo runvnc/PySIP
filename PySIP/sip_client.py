@@ -96,6 +96,11 @@ class SipClient:
                 self.sip_core.receive_task = receive_task
                 tasks.append(self.sip_core.receive_task)
 
+            # Wait for receive task to actually start receiving before starting registration
+            logger.log(logging.DEBUG, "Waiting for receive task to be ready...")
+            await self.sip_core.is_receiving.wait()
+            logger.log(logging.DEBUG, "Receive task is ready, starting registration")
+
             try:
                 self.all_tasks.extend(tasks)
                 await asyncio.gather(*tasks)

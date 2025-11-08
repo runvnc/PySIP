@@ -73,6 +73,7 @@ class SipCore:
         self.on_message_callbacks: List[Callable] = []
         self.tags: List[str] = []
         self.is_running = asyncio.Event()
+        self.is_receiving = asyncio.Event()
         self._is_connecting = asyncio.Event()
         self.reader, self.writer = None, None
         self.udp_reader, self.udp_writer = None, None
@@ -301,6 +302,10 @@ class SipCore:
 
     async def receive(self):
         while True:
+            if not self.is_receiving.is_set():
+                # Give the socket a moment to be fully ready
+                await asyncio.sleep(0.1)
+                self.is_receiving.set()
             if not self.is_running.is_set():
                 break
 
