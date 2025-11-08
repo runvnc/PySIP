@@ -363,6 +363,7 @@ class SipCall:
             return self.construct_invite_message(local_ip, local_port, new_cseq)
 
     def extract_auth_details(self, received_message):
+        """Extract authentication details from either WWW-Authenticate or Proxy-Authenticate"""
         nonce = received_message.nonce
         realm = received_message.realm
         ip = received_message.public_ip
@@ -379,6 +380,7 @@ class SipCall:
         return nonce, realm, ip, port, qop, nc, cnonce
 
     def generate_auth_header(self, method, uri, nonce, realm, qop=None, nc=None, cnonce=None):
+        """Generate Authorization or Proxy-Authorization header"""
         response = self.sip_core.generate_response(
             method=method,
             nonce=nonce,
@@ -388,20 +390,30 @@ class SipCall:
             nc=nc,
             cnonce=cnonce
         )
+        return response
+
+    def build_auth_header(self, uri, nonce, realm, response, opaque=None, qop=None, nc=None, cnonce=None, proxy_auth=False):
+        """Build Authorization or Proxy-Authorization header string"""
+        # Separate server host from port for URI
+        server_host = self.server
+        header_name = "Proxy-Authorization" if proxy_auth else "Authorization"
         
-        # Build base Authorization header
+        # Build the header - use server_host without port in URI
         auth_header = (
-            f'Authorization: Digest username="{self.username}", '
+            f'{header_name}: Digest username="{self.username}", '
             f'realm="{realm}", '
             f'nonce="{nonce}", '
-            f'uri="{uri}", '
+            f'uri="sip:{server_host};transport={self.CTS}", '
             f'response="{response}", '
-            f'algorithm="MD5"'
+            f'algorithm=MD5'
         )
         
         # Add qop parameters if present
         if qop:
             auth_header += f', qop=auth, nc={nc}, cnonce="{cnonce}"'
+        
+        if opaque:
+            auth_header += f', opaque="{opaque}"'
         
         return auth_header + '\r\n'
 
@@ -421,14 +433,25 @@ class SipCall:
         if received_message and not auth_header:
             nonce, realm, ip, port, qop, nc, cnonce = self.extract_auth_details(received_message)
             uri = f"sip:{self.callee}@{self.server}:{self.port};transport={self.CTS}"
-            auth_header = self.generate_auth_header(
+            response = self.generate_auth_header(
                 method="INVITE",
-                uri=uri,
+                uri=f"sip:{self.server};transport={self.CTS}",
                 nonce=nonce,
                 realm=realm,
                 qop=qop,
                 nc=nc,
                 cnonce=cnonce
+            )
+            auth_header = self.build_auth_header(
+                uri=uri,
+                nonce=nonce,
+                realm=realm,
+                response=response,
+                opaque=received_message.opaque,
+                qop=qop,
+                nc=nc,
+                cnonce=cnonce,
+                proxy_auth=received_message.proxy_auth
             )
         
         msg = (
@@ -644,6 +667,24 @@ class SipCall:
         if msg.call_id != self.call_id:
             return
 
+        if msg.status == SIPStatus(407) and msg.method == "INVITE":
+            # Handling 407 Proxy Authentication Required
+            self.dialogue.remote_tag = msg.to_tag
+            transaction = self.dialogue.find_transaction(msg.branch)
+            if not transaction:
+                return
+            ack_message = self.ack_generator(transaction)
+            await self.sip_core.send(ack_message)
+
+            if self.dialogue.auth_retry_count > self.dialogue.AUTH_RETRY_MAX:
+                await self.stop("Unable to authenticate with proxy, check details")
+                return
+            # Then send reinvite with Proxy-Authorization
+            await self.reinvite(True, msg)
+            await self.update_call_state(CallState.DIALING)
+            self.dialogue.auth_retry_count += 1
+            logger.log(logging.DEBUG, "Sent INVITE request with Proxy-Authorization to the server")
+
         if msg.status == SIPStatus(401) and msg.method == "INVITE":
             # Handling the auth of the invite
             self.dialogue.remote_tag = msg.to_tag
@@ -763,7 +804,7 @@ class SipCall:
         if not 400 <= msg.status.code <= 699:
             return
 
-        if msg.status in [SIPStatus(401), SIPStatus(487)]:
+        if msg.status in [SIPStatus(401), SIPStatus(407), SIPStatus(487)]:
             return
 
         if msg.status in [SIPStatus(486), SIPStatus(600), SIPStatus(603)]:

@@ -535,6 +535,7 @@ class SipMessage:
         self._did = None
         self._qop = None
         self._opaque = None
+        self._proxy_auth = False
 
     @property
     def type(self):
@@ -664,6 +665,14 @@ class SipMessage:
     def opaque(self, value):
         self._opaque = value
 
+    @property
+    def proxy_auth(self):
+        return self._proxy_auth
+
+    @proxy_auth.setter
+    def proxy_auth(self, value):
+        self._proxy_auth = value
+
     def parse(self):
         data = self.data.split("\r\n\r\n")
         self.headers_data = data[0]
@@ -739,6 +748,7 @@ class SipMessage:
 
                 # RPort
                 self.rport = via_header.split("rport=")[1].split(";")[0]
+                
                 auth_header = self.get_header("WWW-Authenticate")
                 if auth_header:
                     self.nonce = auth_header.split('nonce="')[1].split('"')[0]
@@ -753,6 +763,25 @@ class SipMessage:
                         self.opaque = auth_header.split('opaque="')[1].split('"')[0]
                     except IndexError:
                         self.opaque = None
+                
+                # Also check for Proxy-Authenticate header (407 responses)
+                proxy_auth_header = self.get_header("Proxy-Authenticate")
+                if proxy_auth_header:
+                    self.proxy_auth = True
+                    self.nonce = proxy_auth_header.split('nonce="')[1].split('"')[0]
+                    self.realm = proxy_auth_header.split('realm="')[1].split('"')[0]
+                    # qop is optional - only parse if present
+                    try:
+                        self.qop = proxy_auth_header.split("qop=")[1].split('"')[1]
+                    except IndexError:
+                        self.qop = None
+                    # opaque is also optional
+                    try:
+                        self.opaque = proxy_auth_header.split('opaque="')[1].split('"')[0]
+                    except IndexError:
+                        self.opaque = None
+                else:
+                    self.proxy_auth = False
                         
                 # dialog_id
                 contact_header = self.get_header("Contact")
