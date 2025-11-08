@@ -111,7 +111,8 @@ class RTPClient:
         self.ssrc = ssrc
         self.__timestamp = random.randint(2000, 8000)
         self.__sequence_number = random.randint(200, 800)
-        self.__jitter_buffer = JitterBuffer(16, 4)
+        # Use small jitter buffer for low-latency S2S (2 packets capacity, 1 packet threshold)
+        self.__jitter_buffer = JitterBuffer(4, 1)
         self.__callbacks = callbacks
         self.__send_thread = None
         self.__recv_thread = None
