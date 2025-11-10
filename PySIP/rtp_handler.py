@@ -362,7 +362,9 @@ class RTPClient:
             except OSError:
                 logger.log(logging.ERROR, "Failed to send RTP Packet", exc_info=True)
 
-            delay = (1 / self.selected_codec.rate) * 160
+            #delay = (1 / self.selected_codec.rate) * 160
+            delay = (1 / self.selected_codec.rate) * 80  # good chance this will break something
+ 
             processing_time = (time.monotonic_ns() - start_processing) / 1e9
             sleep_time = delay - processing_time
             sleep_time = max(0, sleep_time)
