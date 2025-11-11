@@ -298,7 +298,6 @@ class RTPClient:
 
     def send(self, loop: asyncio.AbstractEventLoop):
         while True:
-            payload = None
             if self.__rtp_socket is None or self.__rtp_socket.fileno() < 0:
                 break
             start_processing = time.monotonic_ns()
@@ -323,31 +322,6 @@ class RTPClient:
                 time.sleep(0.02)
                 continue
 
-            # Handle variable-size payloads - split into 160-byte frames if needed
-            # This supports both single frames (160 bytes) and larger chunks
-            if payload and len(payload) > 160:
-                # Large chunk - split and send first frame, requeue remainder
-                frame = payload[:160]
-                remainder = payload[160:]
-                
-                # Requeue remainder for next iteration (put back at front)
-                try:
-                    # Create a temporary queue to hold remainder
-                    temp_items = [remainder]
-                    # Drain current queue
-                    while not audio_stream.input_q.empty():
-                        try:
-                            temp_items.append(audio_stream.input_q.get_nowait())
-                        except queue.Empty:
-                            break
-                    # Put everything back with remainder first
-                    for item in temp_items:
-                        audio_stream.input_q.put(item)
-                except Exception as e:
-                    logger.log(logging.WARNING, f"Error requeueing audio remainder: {e}")
-                
-                payload = frame
-            
             # if all frames are sent then continue
             if not payload:
                 if audio_stream is None:
