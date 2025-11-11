@@ -112,8 +112,8 @@ class RTPClient:
         self.ssrc = ssrc
         self.__timestamp = random.randint(2000, 8000)
         self.__sequence_number = random.randint(200, 800)
-        # Use small jitter buffer for low-latency S2S (2 packets capacity, 1 packet threshold)
-        self.__jitter_buffer = JitterBuffer(4, 1)
+        # Use minimal jitter buffer for low-latency S2S (2 packets capacity, 0 packet threshold for immediate release)
+        self.__jitter_buffer = JitterBuffer(2, 0)  # Optimized from (4,1) then (2,1) to (2,0) for lowest latency
         self.__callbacks = callbacks
         self.__send_thread = None
         self.__recv_thread = None
@@ -298,6 +298,7 @@ class RTPClient:
 
     def send(self, loop: asyncio.AbstractEventLoop):
         while True:
+            payload = None
             if self.__rtp_socket is None or self.__rtp_socket.fileno() < 0:
                 break
             start_processing = time.monotonic_ns()
@@ -322,6 +323,31 @@ class RTPClient:
                 time.sleep(0.02)
                 continue
 
+            # Handle variable-size payloads - split into 160-byte frames if needed
+            # This supports both single frames (160 bytes) and larger chunks
+            if payload and len(payload) > 160:
+                # Large chunk - split and send first frame, requeue remainder
+                frame = payload[:160]
+                remainder = payload[160:]
+                
+                # Requeue remainder for next iteration (put back at front)
+                try:
+                    # Create a temporary queue to hold remainder
+                    temp_items = [remainder]
+                    # Drain current queue
+                    while not audio_stream.input_q.empty():
+                        try:
+                            temp_items.append(audio_stream.input_q.get_nowait())
+                        except queue.Empty:
+                            break
+                    # Put everything back with remainder first
+                    for item in temp_items:
+                        audio_stream.input_q.put(item)
+                except Exception as e:
+                    logger.log(logging.WARNING, f"Error requeueing audio remainder: {e}")
+                
+                payload = frame
+            
             # if all frames are sent then continue
             if not payload:
                 if audio_stream is None:
@@ -362,9 +388,9 @@ class RTPClient:
             except OSError:
                 logger.log(logging.ERROR, "Failed to send RTP Packet", exc_info=True)
 
-            #delay = (1 / self.selected_codec.rate) * 160
-            delay = (1 / self.selected_codec.rate) * 80  # good chance this will break something
- 
+            delay = (1 / self.selected_codec.rate) * 160
+            #delay = (1 / self.selected_codec.rate) * 80  # takes too long to interrupt
+            delay = delay * 0.9 
             processing_time = (time.monotonic_ns() - start_processing) / 1e9
             sleep_time = delay - processing_time
             sleep_time = max(0, sleep_time)
