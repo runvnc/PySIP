@@ -112,12 +112,10 @@ class RTPClient:
         self.ssrc = ssrc
         self.__timestamp = random.randint(2000, 8000)
         self.__sequence_number = random.randint(200, 800)
-        # Use minimal jitter buffer for incoming audio
+        # Jitter buffer for incoming audio
         self.__jitter_buffer = JitterBuffer(2, 0)
-        # Smoothing buffer for outgoing audio to eliminate clicks from backpressure
-        self.__smoothing_buffer = []
-        self.__smoothing_buffer_size = 3  # 3 frames = 60ms smoothing
-        self.__last_frame = None
+        # Small buffer for outgoing audio to smooth backpressure artifacts
+        self.__outgoing_buffer = []
         self.__callbacks = callbacks
         self.__send_thread = None
         self.__recv_thread = None
@@ -301,42 +299,6 @@ class RTPClient:
             time.sleep(0.01)
 
     def send(self, loop: asyncio.AbstractEventLoop):
-        def crossfade_frames(frame1, frame2, fade_samples=20):
-            """Crossfade between two audio frames to eliminate clicks.
-            
-            Args:
-                frame1: First frame (fading out)
-                frame2: Second frame (fading in)
-                fade_samples: Number of samples to crossfade (default 20 = 2.5ms at 8kHz)
-            
-            Returns:
-                Crossfaded frame2
-            """
-            if not frame1 or not frame2 or len(frame1) < fade_samples or len(frame2) < fade_samples:
-                return frame2
-            
-            # Convert ulaw to linear PCM for crossfading
-            import audioop
-            pcm1 = audioop.ulaw2lin(frame1[-fade_samples:], 2)
-            pcm2 = audioop.ulaw2lin(frame2[:fade_samples], 2)
-            
-            # Crossfade: fade out frame1, fade in frame2
-            faded = bytearray()
-            for i in range(0, len(pcm1), 2):  # 16-bit samples = 2 bytes
-                sample1 = int.from_bytes(pcm1[i:i+2], 'little', signed=True)
-                sample2 = int.from_bytes(pcm2[i:i+2], 'little', signed=True)
-                
-                fade_pos = i // 2
-                fade_out = 1.0 - (fade_pos / (fade_samples // 2))
-                fade_in = fade_pos / (fade_samples // 2)
-                
-                mixed = int(sample1 * fade_out + sample2 * fade_in)
-                faded.extend(mixed.to_bytes(2, 'little', signed=True))
-            
-            # Convert back to ulaw and replace start of frame2
-            faded_ulaw = audioop.lin2ulaw(bytes(faded), 2)
-            return faded_ulaw + frame2[fade_samples:]
-        
         while True:
             if self.__rtp_socket is None or self.__rtp_socket.fileno() < 0:
                 break
@@ -362,15 +324,17 @@ class RTPClient:
                 time.sleep(0.02)
                 continue
             
-            # Apply crossfading if we have a previous frame
-            if self.__last_frame and payload and len(payload) == 160:
-                payload = crossfade_frames(self.__last_frame, payload)
-            
-            # Store for next crossfade
+            # Add to outgoing buffer for smoothing (2 frame buffer = 40ms)
             if payload and len(payload) == 160:
-                self.__last_frame = payload
-            else:
-                self.__last_frame = None
+                self.__outgoing_buffer.append(payload)
+                
+                # Keep buffer at 2 frames
+                if len(self.__outgoing_buffer) < 2:
+                    # Buffer not full yet, send silence to build up buffer
+                    payload = b'\xff' * 160  # ulaw silence
+                else:
+                    # Buffer full, send oldest frame
+                    payload = self.__outgoing_buffer.pop(0)
 
             # if all frames are sent then continue
             if not payload:
