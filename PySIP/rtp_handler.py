@@ -381,6 +381,7 @@ class RTPClient:
             # delay = delay * 0.9  # Removed - was causing sped up audio and timing artifacts
             #delay = delay * 0.9 
             processing_time = (time.monotonic_ns() - start_processing) / 1e9
+            delay -= 0.2
             sleep_time = delay - processing_time
             sleep_time = max(0, sleep_time)
             self.__sequence_number = (self.__sequence_number + 1) % 65535  # Wrap around at 2^16 - 1
