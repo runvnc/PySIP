@@ -299,6 +299,7 @@ class RTPClient:
             time.sleep(0.01)
 
     def send(self, loop: asyncio.AbstractEventLoop):
+        logger.log(logging.INFO, "RTP send thread starting")
         while True:
             if self.__rtp_socket is None or self.__rtp_socket.fileno() < 0:
                 break
@@ -307,7 +308,6 @@ class RTPClient:
             audio_stream = self.get_audio_stream()
             if not self.is_running.is_set():
                 break
-            logger.log(logging.DEBUG, f"RTP send loop: audio_stream={audio_stream is not None}, SEND_SILENCE={SEND_SILENCE}")
 
             if not audio_stream and not SEND_SILENCE:
                 time.sleep(0.02)
@@ -316,11 +316,14 @@ class RTPClient:
             try:
                 if audio_stream is None:
                     payload = self.generate_silence_frames()
-                    logger.log(logging.DEBUG, f"Generated silence frame: {len(payload)} bytes")
                 else:
+                    # Log only on first successful read from queue
+                    if not hasattr(self, '_first_frame_logged'):
+                        logger.log(logging.INFO, f"RTP send: First frame read from queue, stream_id={audio_stream.stream_id}")
+                        self._first_frame_logged = True
                     payload = audio_stream.input_q.get_nowait()
             except queue.Empty:
-                logger.log(logging.DEBUG, "Audio queue empty, sleeping")
+                # Don't log every empty queue check
                 time.sleep(0.02)
                 continue
             
@@ -332,6 +335,9 @@ class RTPClient:
                 if len(self.__outgoing_buffer) < 3:
                     # Buffer not full yet, send silence to build up initial buffer
                     payload = b'\xff' * 160  # ulaw silence
+                    if not hasattr(self, '_buffering_logged'):
+                        logger.log(logging.INFO, f"RTP send: Buffering frames, buffer size={len(self.__outgoing_buffer)}/3")
+                        self._buffering_logged = True
                 else:
                     # Buffer full, send oldest frame
                     payload = self.__outgoing_buffer.pop(0)
@@ -356,7 +362,6 @@ class RTPClient:
             if audio_stream and hasattr(audio_stream, 'pre_encoded') and audio_stream.pre_encoded:
                 # Audio is already encoded (e.g., ulaw from OpenAI), use it directly
                 encoded_payload = payload
-                logger.log(logging.DEBUG, f"Using pre-encoded payload: {len(payload)} bytes")
             else:
                 # Audio needs encoding (e.g., PCM16 to ulaw)
                 encoded_payload = self.__encoder.encode(payload)
@@ -370,8 +375,6 @@ class RTPClient:
             try:
                 self.__rtp_socket.setblocking(True)
                 self.__rtp_socket.sendto(packet, (self.dst_ip, self.dst_port))
-                logger.log(logging.DEBUG, f"Sent RTP packet to {self.dst_ip}:{self.dst_port}, seq={self.__sequence_number}")
-                #logger.log(logging.DEBUG, f"Sent RTP Packet: Seq={self.__sequence_number}, Timestamp={self.__timestamp}")
                 self.__rtp_socket.setblocking(False)
             except OSError:
                 logger.log(logging.ERROR, "Failed to send RTP Packet", exc_info=True)
@@ -380,8 +383,8 @@ class RTPClient:
             #delay = (1 / self.selected_codec.rate) * 80  # takes too long to interrupt
             # delay = delay * 0.9  # Removed - was causing sped up audio and timing artifacts
             #delay = delay * 0.9 
-            processing_time = (time.monotonic_ns() - start_processing) / 1e9
             delay -= 0.2
+            processing_time = (time.monotonic_ns() - start_processing) / 1e9
             sleep_time = delay - processing_time
             sleep_time = max(0, sleep_time)
             self.__sequence_number = (self.__sequence_number + 1) % 65535  # Wrap around at 2^16 - 1
@@ -498,6 +501,9 @@ class RTPClient:
         # if there is previous stream mark it as done
         if audio_stream := self.get_audio_stream():
             audio_stream.stream_done()
+        
+        if stream:
+            logger.log(logging.INFO, f"RTP: Audio stream set, stream_id={stream.stream_id}, queue has {stream.input_q.qsize()} items")
         self._audio_stream = stream
 
         if stream:

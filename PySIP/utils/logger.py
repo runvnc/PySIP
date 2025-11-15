@@ -8,7 +8,8 @@ def get_call_logger(call_id):
 
 def setup_logger():
     logger = logging.getLogger(__name__)
-    logger.setLevel(logging.DEBUG)  # Only show critical errors
+    #logger.setLevel(logging.DEBUG)  # Only show critical errors
+    logger.setLevel(logging.CRITICAL)  # Only show critical errors
 
     # console handler
     ch = logging.StreamHandler()
@@ -29,7 +30,9 @@ def setup_logger():
 
 def setup_async_logger():
     logger = logging.getLogger(__name__)
-    logger.setLevel(logging.DEBUG)  # Only show critical errors
+    #logger.setLevel(logging.DEBUG)  # Only show critical errors
+    logger.setLevel(logging.CRITICAL)  # Only show critical errors
+
 
     # console handler
     ch = logging.StreamHandler()
