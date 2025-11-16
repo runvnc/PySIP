@@ -307,6 +307,7 @@ class RTPClient:
 
             audio_stream = self.get_audio_stream()
             if not self.is_running.is_set():
+                logger.log(logging.DEBUG, "RTP send: is_running is False, breaking")
                 break
 
             if not audio_stream and not SEND_SILENCE:
@@ -318,9 +319,9 @@ class RTPClient:
                     payload = self.generate_silence_frames()
                 else:
                     # Log only on first successful read from queue
-                    if not hasattr(self, '_first_frame_logged'):
-                        logger.log(logging.INFO, f"RTP send: First frame read from queue, stream_id={audio_stream.stream_id}")
-                        self._first_frame_logged = True
+                    #if not hasattr(self, '_first_frame_logged'):
+                    logger.log(logging.INFO, f"RTP send: frame read from queue, stream_id={audio_stream.stream_id}")
+                    self._first_frame_logged = True
                     payload = audio_stream.input_q.get_nowait()
             except queue.Empty:
                 # Don't log every empty queue check
@@ -335,12 +336,15 @@ class RTPClient:
                 if len(self.__outgoing_buffer) < 3:
                     # Buffer not full yet, send silence to build up initial buffer
                     payload = b'\xff' * 160  # ulaw silence
-                    if not hasattr(self, '_buffering_logged'):
-                        logger.log(logging.INFO, f"RTP send: Buffering frames, buffer size={len(self.__outgoing_buffer)}/3")
-                        self._buffering_logged = True
+                    #if not hasattr(self, '_buffering_logged'):
+                    logger.log(logging.INFO, f"RTP send: Buffering frames, buffer size={len(self.__outgoing_buffer)}/3")
+                    self._buffering_logged = True
                 else:
                     # Buffer full, send oldest frame
                     payload = self.__outgoing_buffer.pop(0)
+
+            else:
+                logger.log(logging.WARNING, f"RTP send: Invalid payload size: {len(payload) if payload else 0}")
 
             # if all frames are sent then continue
             if not payload:
@@ -376,6 +380,7 @@ class RTPClient:
                 self.__rtp_socket.setblocking(True)
                 self.__rtp_socket.sendto(packet, (self.dst_ip, self.dst_port))
                 self.__rtp_socket.setblocking(False)
+                logging.log(logging.DEBUG, f"Sent RTP Packet: Seq={self.__sequence_number}, Timestamp={self.__timestamp}, PayloadType={self.selected_codec}, Size={len(packet)} bytes")
             except OSError:
                 logger.log(logging.ERROR, "Failed to send RTP Packet", exc_info=True)
 
@@ -383,7 +388,7 @@ class RTPClient:
             #delay = (1 / self.selected_codec.rate) * 80  # takes too long to interrupt
             # delay = delay * 0.9  # Removed - was causing sped up audio and timing artifacts
             #delay = delay * 0.9 
-            delay -= 0.2
+            #delay -= 0.2
             processing_time = (time.monotonic_ns() - start_processing) / 1e9
             sleep_time = delay - processing_time
             sleep_time = max(0, sleep_time)
@@ -406,12 +411,12 @@ class RTPClient:
 
             try: 
                 data = self.__rtp_socket.recv(4096)
-                logger.log(logging.DEBUG, f"RTP receive: got {len(data)} bytes")
+                #logger.log(logging.DEBUG, f"RTP receive: got {len(data)} bytes")
                 if data is None:
                     break
 
                 packet = RtpPacket.parse(data)
-                logger.log(logging.DEBUG, f"RTP receive: parsed packet, payload_type={packet.payload_type}")
+                #logger.log(logging.DEBUG, f"RTP receive: parsed packet, payload_type={packet.payload_type}")
                 if packet.payload_type == CodecInfo.EVENT:
                     # handle rfc 2833 
                     if DTMF_MODE is DTMFMode.RFC_2833:
@@ -431,7 +436,7 @@ class RTPClient:
 
                 encoded_frame = self.__jitter_buffer.add(packet)
                 # if we have enough encoded buffer then decode
-                logger.log(logging.DEBUG, f"RTP receive: jitter buffer returned frame={encoded_frame is not None}")
+                #logger.log(logging.DEBUG, f"RTP receive: jitter buffer returned frame={encoded_frame is not None}")
                 if encoded_frame:
                     if self.__amd_detector and not self.__amd_detector.amd_started.is_set():
                         self.__amd_detector.amd_started.set()
@@ -444,7 +449,7 @@ class RTPClient:
                             pass
                     
                     decoded_frame = self.__decoder.decode(encoded_frame.data)
-                    logger.log(logging.DEBUG, f"RTP receive: decoded frame, {len(decoded_frame)} bytes, sending to {len(self._output_queues)} queues")
+                    #logger.log(logging.DEBUG, f"RTP receive: decoded frame, {len(decoded_frame)} bytes, sending to {len(self._output_queues)} queues")
                     for queue_name, output_q in self._output_queues.items():
                         if queue_name == 'frame_monitor':  # Skip frame_monitor, already sent encoded data
                             continue
