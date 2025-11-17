@@ -385,10 +385,6 @@ class RTPClient:
                 logger.log(logging.ERROR, "Failed to send RTP Packet", exc_info=True)
 
             delay = (1 / self.selected_codec.rate) * 160
-            #delay = (1 / self.selected_codec.rate) * 80  # takes too long to interrupt
-            # delay = delay * 0.9  # Removed - was causing sped up audio and timing artifacts
-            #delay = delay * 0.9 
-            #delay -= 0.2
             processing_time = (time.monotonic_ns() - start_processing) / 1e9
             sleep_time = delay - processing_time
             sleep_time = max(0, sleep_time)
