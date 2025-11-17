@@ -113,7 +113,7 @@ class RTPClient:
         self.__timestamp = random.randint(2000, 8000)
         self.__sequence_number = random.randint(200, 800)
         # Jitter buffer for incoming audio
-        self.__jitter_buffer = JitterBuffer(2, 0)
+        self.__jitter_buffer = JitterBuffer(4, 2)
         # Small buffer for outgoing audio to smooth backpressure artifacts
         self.__outgoing_buffer = []
         self.__callbacks = callbacks
@@ -307,7 +307,7 @@ class RTPClient:
 
             audio_stream = self.get_audio_stream()
             if not self.is_running.is_set():
-                logger.log(logging.DEBUG, "RTP send: is_running is False, breaking")
+                #logger.log(logging.DEBUG, "RTP send: is_running is False, breaking")
                 break
 
             if not audio_stream and not SEND_SILENCE:
@@ -320,7 +320,7 @@ class RTPClient:
                 else:
                     # Log only on first successful read from queue
                     #if not hasattr(self, '_first_frame_logged'):
-                    logger.log(logging.INFO, f"RTP send: frame read from queue, stream_id={audio_stream.stream_id}")
+                    #logger.log(logging.INFO, f"RTP send: frame read from queue, stream_id={audio_stream.stream_id}")
                     self._first_frame_logged = True
                     payload = audio_stream.input_q.get_nowait()
             except queue.Empty:
@@ -380,7 +380,7 @@ class RTPClient:
                 self.__rtp_socket.setblocking(True)
                 self.__rtp_socket.sendto(packet, (self.dst_ip, self.dst_port))
                 self.__rtp_socket.setblocking(False)
-                logging.log(logging.DEBUG, f"Sent RTP Packet: Seq={self.__sequence_number}, Timestamp={self.__timestamp}, PayloadType={self.selected_codec}, Size={len(packet)} bytes")
+                #logging.log(logging.DEBUG, f"Sent RTP Packet: Seq={self.__sequence_number}, Timestamp={self.__timestamp}, PayloadType={self.selected_codec}, Size={len(packet)} bytes")
             except OSError:
                 logger.log(logging.ERROR, "Failed to send RTP Packet", exc_info=True)
 
@@ -399,10 +399,10 @@ class RTPClient:
         logger.log(logging.INFO, "RTP receive thread started")
         while True:
             if not self.is_running.is_set():
-                logger.log(logging.DEBUG, "RTP receive: is_running is False, breaking")
+                #logger.log(logging.DEBUG, "RTP receive: is_running is False, breaking")
                 break
             if self.__rtp_socket is None or self.__rtp_socket.fileno() < 0:
-                logger.log(logging.DEBUG, "RTP receive: socket is None or closed, breaking")
+                #logger.log(logging.DEBUG, "RTP receive: socket is None or closed, breaking")
                 break
 
             try: 
@@ -503,8 +503,8 @@ class RTPClient:
         if audio_stream := self.get_audio_stream():
             audio_stream.stream_done()
         
-        if stream:
-            logger.log(logging.INFO, f"RTP: Audio stream set, stream_id={stream.stream_id}, queue has {stream.input_q.qsize()} items")
+        #if stream:
+        #    logger.log(logging.INFO, f"RTP: Audio stream set, stream_id={stream.stream_id}, queue has {stream.input_q.qsize()} items")
         self._audio_stream = stream
 
         if stream:
