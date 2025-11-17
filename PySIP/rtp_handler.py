@@ -113,7 +113,9 @@ class RTPClient:
         self.__timestamp = random.randint(2000, 8000)
         self.__sequence_number = random.randint(200, 800)
         # Jitter buffer for incoming audio
-        self.__jitter_buffer = JitterBuffer(2, 0)
+        #self.__jitter_buffer = JitterBuffer(2, 0)
+        self.__jitter_buffer = JitterBuffer(2, 1)
+
         # Small buffer for outgoing audio to smooth backpressure artifacts
         self.__outgoing_buffer = []
         self.__callbacks = callbacks
