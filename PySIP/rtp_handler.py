@@ -2,7 +2,7 @@ import asyncio
 from dataclasses import dataclass
 from enum import Enum
 import logging
-#logging.disable(logging.CRITICAL)  # Disable ALL logging for performance testing
+logging.disable(logging.CRITICAL)  # Disable ALL logging for performance testing
 import queue
 import random
 import socket
@@ -330,22 +330,20 @@ class RTPClient:
                 time.sleep(0.02)
                 continue
             
-            # Add to outgoing buffer for smoothing (2 frame buffer = 40ms)
+            # DISABLED: Outgoing buffer for smoothing - testing without it
+            # Add to outgoing buffer for smoothing (6 frame buffer = 120ms)
             if payload and len(payload) == 160:
-                self.__outgoing_buffer.append(payload)
+                # ORIGINAL BUFFERING CODE (COMMENTED OUT FOR TESTING):
+                # self.__outgoing_buffer.append(payload)
+                # if len(self.__outgoing_buffer) < 6:
+                #     # Buffer not full yet, send silence to build up initial buffer
+                #     payload = b'\xff' * 160  # ulaw silence
+                # else:
+                #     # Buffer full, send oldest frame
+                #     payload = self.__outgoing_buffer.pop(0)
                 
-                # Keep buffer at 6 frames
-                # We have an input q already
-                # Will buffer upstream when response starts coming in
-                if len(self.__outgoing_buffer) < 6:
-                    # Buffer not full yet, send silence to build up initial buffer
-                    payload = b'\xff' * 160  # ulaw silence
-                    #if not hasattr(self, '_buffering_logged'):
-                    #logger.log(logging.INFO, f"RTP send: Buffering frames, buffer size={len(self.__outgoing_buffer)}/3")
-                    self._buffering_logged = True
-                else:
-                    # Buffer full, send oldest frame
-                    payload = self.__outgoing_buffer.pop(0)
+                # NEW: Send frames immediately without buffering
+                pass  # Just use the payload as-is
 
             else:
                 logger.log(logging.WARNING, f"RTP send: Invalid payload size: {len(payload) if payload else 0}")
