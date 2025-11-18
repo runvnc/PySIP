@@ -315,6 +315,9 @@ class RTPClient:
             if not audio_stream and not SEND_SILENCE:
                 time.sleep(0.02)
                 continue
+            
+            # Initialize target_timestamp to None before try block
+            target_timestamp = None
 
             try:
                 if audio_stream is None:
@@ -333,7 +336,6 @@ class RTPClient:
                         payload, target_timestamp = item
                     else:
                         payload = item
-                        target_timestamp = None
                     
             except queue.Empty:
                 # Don't log every empty queue check
