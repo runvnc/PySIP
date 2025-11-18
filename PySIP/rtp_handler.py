@@ -324,7 +324,17 @@ class RTPClient:
                     #if not hasattr(self, '_first_frame_logged'):
                     #logger.log(logging.INFO, f"RTP send: frame read from queue, stream_id={audio_stream.stream_id}")
                     self._first_frame_logged = True
-                    payload = audio_stream.input_q.get_nowait()
+                    
+                    # Get frame from queue - may include timestamp
+                    item = audio_stream.input_q.get_nowait()
+                    
+                    # Unpack if tuple (frame, timestamp), otherwise just frame
+                    if isinstance(item, tuple):
+                        payload, target_timestamp = item
+                    else:
+                        payload = item
+                        target_timestamp = None
+                    
             except queue.Empty:
                 # Don't log every empty queue check
                 time.sleep(0.02)
@@ -386,6 +396,30 @@ class RTPClient:
             except OSError:
                 logger.log(logging.ERROR, "Failed to send RTP Packet", exc_info=True)
 
+            # Calculate sleep time based on timestamp if provided
+            if target_timestamp is not None:
+                # Use provided timestamp for precise timing
+                current_time = time.perf_counter()
+                sleep_time = target_timestamp - current_time
+                
+                # Monitor timestamp drift
+                if sleep_time < -0.05:  # More than 50ms behind
+                    logger.log(logging.CRITICAL, 
+                              f"RTP: Timestamp in the past! Drift: {-sleep_time*1000:.1f}ms - audio may sound rushed")
+                    sleep_time = 0  # Send immediately, try to catch up
+                elif sleep_time > 0.5:  # More than 500ms ahead
+                    logger.log(logging.WARNING,
+                              f"RTP: Timestamp too far ahead: {sleep_time*1000:.1f}ms - may cause latency")
+                elif sleep_time < 0:
+                    # Slightly behind but not critical, just catch up
+                    sleep_time = 0
+                
+                # Use timestamp-based timing
+                self.__sequence_number = (self.__sequence_number + 1) % 65535
+                self.__timestamp = (self.__timestamp + len(encoded_payload)) % 4294967295
+                time.sleep(max(0, sleep_time))
+            else:
+                # Fallback to original timing if no timestamp provided
             delay = (1 / self.selected_codec.rate) * 160
             #delay -= 0.002  # compensate for processing time (causes apparent response delay)
             processing_time = (time.monotonic_ns() - start_processing) / 1e9
@@ -394,7 +428,7 @@ class RTPClient:
             self.__sequence_number = (self.__sequence_number + 1) % 65535  # Wrap around at 2^16 - 1
             self.__timestamp = (self.__timestamp + len(encoded_payload)) % 4294967295  # Wrap around at 2^32 -1
 
-            time.sleep(sleep_time)
+                time.sleep(sleep_time)
         
         logger.log(logging.DEBUG, "Sender thread has been successfully closed") 
 
