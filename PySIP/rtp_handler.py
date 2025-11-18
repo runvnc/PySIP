@@ -422,13 +422,13 @@ class RTPClient:
                 time.sleep(max(0, sleep_time))
             else:
                 # Fallback to original timing if no timestamp provided
-                delay = (1 / self.selected_codec.rate) * 160
-                #delay -= 0.002  # compensate for processing time (causes apparent response delay)
-                processing_time = (time.monotonic_ns() - start_processing) / 1e9
-                sleep_time = delay - processing_time
-                sleep_time = max(0, sleep_time)
-                self.__sequence_number = (self.__sequence_number + 1) % 65535  # Wrap around at 2^16 - 1
-                self.__timestamp = (self.__timestamp + len(encoded_payload)) % 4294967295  # Wrap around at 2^32 -1
+            delay = (1 / self.selected_codec.rate) * 160
+            #delay -= 0.002  # compensate for processing time (causes apparent response delay)
+            processing_time = (time.monotonic_ns() - start_processing) / 1e9
+            sleep_time = delay - processing_time
+            sleep_time = max(0, sleep_time)
+            self.__sequence_number = (self.__sequence_number + 1) % 65535  # Wrap around at 2^16 - 1
+            self.__timestamp = (self.__timestamp + len(encoded_payload)) % 4294967295  # Wrap around at 2^32 -1
 
                 time.sleep(sleep_time)
         
