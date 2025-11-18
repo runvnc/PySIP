@@ -330,12 +330,12 @@ class RTPClient:
                 time.sleep(0.02)
                 continue
             
-            # Add to outgoing buffer for smoothing (3 frame buffer = 60ms)
+            # Add to outgoing buffer for smoothing (2 frame buffer = 40ms)
             if payload and len(payload) == 160:
                 self.__outgoing_buffer.append(payload)
                 
                 # Keep buffer at 3 frames
-                if len(self.__outgoing_buffer) < 3:
+                if len(self.__outgoing_buffer) < 2:
                     # Buffer not full yet, send silence to build up initial buffer
                     payload = b'\xff' * 160  # ulaw silence
                     #if not hasattr(self, '_buffering_logged'):
