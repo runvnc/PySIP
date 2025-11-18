@@ -334,14 +334,14 @@ class RTPClient:
             if payload and len(payload) == 160:
                 self.__outgoing_buffer.append(payload)
                 
-                # Keep buffer at 3 frames
+                # Keep buffer at 6 frames
                 # We have an input q already
                 # Will buffer upstream when response starts coming in
-                if False and len(self.__outgoing_buffer) < 2:
+                if len(self.__outgoing_buffer) < 6:
                     # Buffer not full yet, send silence to build up initial buffer
                     payload = b'\xff' * 160  # ulaw silence
                     #if not hasattr(self, '_buffering_logged'):
-                    logger.log(logging.INFO, f"RTP send: Buffering frames, buffer size={len(self.__outgoing_buffer)}/3")
+                    #logger.log(logging.INFO, f"RTP send: Buffering frames, buffer size={len(self.__outgoing_buffer)}/3")
                     self._buffering_logged = True
                 else:
                     # Buffer full, send oldest frame
