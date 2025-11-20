@@ -8,8 +8,8 @@ def get_call_logger(call_id):
 
 def setup_logger():
     logger = logging.getLogger(__name__)
-    #logger.setLevel(logging.DEBUG)  # Only show critical errors
-    logger.setLevel(logging.ERROR)  # Only show errors and above
+    logger.setLevel(logging.DEBUG)  # Only show critical errors
+    #logger.setLevel(logging.ERROR)  # Only show errors and above
 
     # console handler
     ch = logging.StreamHandler()

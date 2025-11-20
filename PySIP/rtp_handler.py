@@ -475,14 +475,19 @@ class RTPClient:
                 if encoded_frame:
                     if self.__amd_detector and not self.__amd_detector.amd_started.is_set():
                         self.__amd_detector.amd_started.set()
-                    
-                    # Send encoded (raw ulaw) data to frame_monitor for S2S
+
+                    # Send encoded (raw ulaw) frame to frame_monitor for S2S.
+                    # Use the full JitterFrame object so consumers can access
+                    # both .data and .timestamp (RTP timestamp in ticks).
                     if 'frame_monitor' in self._output_queues:
                         try:
-                            loop.call_soon_threadsafe(self._output_queues['frame_monitor'].put_nowait, encoded_frame.data)
+                            loop.call_soon_threadsafe(
+                                self._output_queues['frame_monitor'].put_nowait,
+                                encoded_frame,
+                            )
                         except RuntimeError:
                             pass
-                    
+
                     decoded_frame = self.__decoder.decode(encoded_frame.data)
                     #logger.log(logging.DEBUG, f"RTP receive: decoded frame, {len(decoded_frame)} bytes, sending to {len(self._output_queues)} queues")
                     for queue_name, output_q in self._output_queues.items():
