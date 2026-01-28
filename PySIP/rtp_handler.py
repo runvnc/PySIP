@@ -2,7 +2,7 @@ import asyncio
 from dataclasses import dataclass
 from enum import Enum
 import logging
-logging.disable(logging.CRITICAL)  # Disable ALL logging for performance testing
+#logging.disable(logging.CRITICAL)  # Disable ALL logging for performance testing
 import queue
 import random
 import socket
