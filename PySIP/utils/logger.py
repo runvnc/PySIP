@@ -37,17 +37,16 @@ def setup_logger():
 
 def setup_async_logger():
     logger = logging.getLogger(__name__)
-    #logger.setLevel(logging.DEBUG)  # Only show critical errors
-    logger.setLevel(logging.ERROR)  # Only show errors and above
+    logger.setLevel(LOG_LEVEL)
 
 
     # console handler
     ch = logging.StreamHandler()
-    ch.setLevel(logging.DEBUG)
+    ch.setLevel(LOG_LEVEL)
 
     # file handler
     fh = RotatingFileHandler('PySIP.log')
-    fh.setLevel(logging.DEBUG)
+    fh.setLevel(LOG_LEVEL)
 
     # formatter
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
