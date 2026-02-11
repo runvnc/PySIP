@@ -1,3 +1,4 @@
+import os
 import logging
 from logging.handlers import RotatingFileHandler, QueueHandler, QueueListener
 import queue
@@ -6,19 +7,25 @@ def get_call_logger(call_id):
     call_logger = logging.LoggerAdapter(logger, {'call_id': call_id})
     return call_logger
 
+# Check MR_DEBUG env variable
+MR_DEBUG = os.environ.get('MR_DEBUG', '').lower() in ('1', 'true', 'yes')
+
+# Set log level based on MR_DEBUG
+LOG_LEVEL = logging.DEBUG if MR_DEBUG else logging.WARNING
+
 def setup_logger():
     logger = logging.getLogger(__name__)
-    logger.setLevel(logging.DEBUG)  # Only show critical errors
+    logger.setLevel(LOG_LEVEL)
     #logger.setLevel(logging.ERROR)  # Only show errors and above
 
     # console handler
     ch = logging.StreamHandler()
-    ch.setLevel(logging.DEBUG)
+    ch.setLevel(LOG_LEVEL)
     logger.addHandler(ch)
 
     # file handler
     fh = RotatingFileHandler('PySIP.log', maxBytes=1000000, backupCount=5)
-    fh.setLevel(logging.DEBUG)
+    fh.setLevel(LOG_LEVEL)
     logger.addHandler(fh)
 
     # formatter
