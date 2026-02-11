@@ -11,7 +11,11 @@ def get_call_logger(call_id):
 MR_DEBUG = os.environ.get('MR_DEBUG', '').lower() in ('1', 'true', 'yes')
 
 # Set log level based on MR_DEBUG
-LOG_LEVEL = logging.DEBUG if MR_DEBUG else logging.WARNING
+if not MR_DEBUG:
+    # Completely suppress all logging for production performance
+    logging.disable(logging.CRITICAL)
+
+LOG_LEVEL = logging.DEBUG if MR_DEBUG else logging.CRITICAL
 
 def setup_logger():
     logger = logging.getLogger(__name__)
