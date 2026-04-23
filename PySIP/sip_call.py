@@ -378,6 +378,18 @@ class SipCall:
         # Update local session info to use public IP
         if self.dialogue._local_session_info and sdp_ip:
             self.dialogue._local_session_info.ip_address = sdp_ip
+            # Also update the underlying SDP dict so __str__ uses the public IP
+            sdp_dict = self.dialogue._local_session_info.sdp
+            if sdp_dict and isinstance(sdp_dict, dict) and 'c' in sdp_dict:
+                sdp_dict['c'] = f'IN IP4 {sdp_ip}'
+            # Also update o= line and rtcp a= line with public IP
+            if sdp_dict and isinstance(sdp_dict, dict):
+                if 'o' in sdp_dict:
+                    parts = sdp_dict['o'].rsplit(' ', 1)
+                    if len(parts) == 2:
+                        sdp_dict['o'] = f'{parts[0]} {sdp_ip}'
+                if 'a' in sdp_dict and isinstance(sdp_dict['a'], list):
+                    sdp_dict['a'] = [a.replace(self.my_private_ip, sdp_ip) if 'rtcp' in a else a for a in sdp_dict['a']]
         
         # Check if we should pre-authenticate the initial INVITE
         if self._preauth_enabled and not auth and not received_message:
