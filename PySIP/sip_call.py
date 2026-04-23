@@ -370,9 +370,7 @@ class SipCall:
     def generate_invite_message(self, auth=False, received_message=None):
         _, local_port = self.sip_core.get_extra_info("sockname")
         # FIXED: Use public IP for SDP to avoid NAT issues
-        # The Via header will use private IP, but SDP needs public IP
-        # so Telnyx can send RTP back to us
-        local_ip = self.my_private_ip  # For Via header
+        local_ip = self.my_public_ip or self.my_private_ip  # Use public IP everywhere (NAT)
         sdp_ip = self.my_public_ip or self.my_private_ip  # For SDP
 
         # Update local session info to use public IP
