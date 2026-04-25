@@ -237,8 +237,19 @@ class RTPClient:
 
         raise NoSupportedCodecsFound
 
-    def generate_silence_frames(self, sample_width = 2, nframes = 160):
-        # Generate silence sound data or mimic sound data
+    def generate_silence_frames(self, sample_width = 2, nframes = 160, pre_encoded: bool = False):
+        # Generate 20ms of silence for the selected codec.
+        #
+        # When the active audio stream is pre_encoded=True, the payload bypasses
+        # the encoder below and must already be in RTP codec format. For PCMU
+        # that means 160 bytes of ulaw silence, not 320 bytes of PCM zeros.
+        if pre_encoded:
+            if self.selected_codec == CodecInfo.PCMU:
+                return b"\xff" * nframes
+            if self.selected_codec == CodecInfo.PCMA:
+                return b"\xd5" * nframes
+
+        # PCM16 silence for paths that still pass through self.__encoder.encode().
         return b"\x00" * (sample_width * nframes)
 
     def is_rfc_2833_supported(self, offered_codecs):
@@ -344,7 +355,13 @@ class RTPClient:
                 # Linphone may react badly to RTP gaps and produce flutter/echo
                 # artifacts when real audio resumes.
                 if SEND_SILENCE:
-                    payload = self.generate_silence_frames()
+                    payload = self.generate_silence_frames(
+                        pre_encoded=bool(
+                            audio_stream
+                            and hasattr(audio_stream, 'pre_encoded')
+                            and audio_stream.pre_encoded
+                        )
+                    )
                     target_timestamp = None
                 else:
                     # Don't log every empty queue check
