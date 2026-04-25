@@ -338,9 +338,18 @@ class RTPClient:
                         payload = item
                     
             except queue.Empty:
-                # Don't log every empty queue check
-                time.sleep(0.02)
-                continue
+                # Keep RTP continuous even when an active audio stream's queue
+                # briefly runs dry between TTS chunks / speak() calls. Without
+                # this, SEND_SILENCE=True only works when audio_stream is None;
+                # Linphone may react badly to RTP gaps and produce flutter/echo
+                # artifacts when real audio resumes.
+                if SEND_SILENCE:
+                    payload = self.generate_silence_frames()
+                    target_timestamp = None
+                else:
+                    # Don't log every empty queue check
+                    time.sleep(0.02)
+                    continue
             
             # DISABLED: Outgoing buffer for smoothing - testing without it
             # Add to outgoing buffer for smoothing (6 frame buffer = 120ms)
