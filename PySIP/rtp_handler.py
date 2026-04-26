@@ -2,6 +2,7 @@ import asyncio
 from dataclasses import dataclass
 from enum import Enum
 import logging
+import os
 #logging.disable(logging.CRITICAL)  # Disable ALL logging for performance testing
 import queue
 import random
@@ -28,8 +29,25 @@ MAX_WAIT_FOR_STREAM = 40  # seconds
 RTP_HEADER_LENGTH = 12
 RTP_PORT_RANGE = range(10_000, 20_000)
 SEND_SILENCE = True # send silence frames when no stream
-OUTGOING_PREBUFFER_FRAMES = 4  # 80ms smoothing buffer before playing a stream
-OUTGOING_MAX_DRAIN_FRAMES = 50  # prevent one loop from spending too long draining producer bursts
+
+
+def _env_int(name: str, default: int, minimum: int | None = None, maximum: int | None = None) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    if minimum is not None:
+        value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
+
+
+# Outgoing smoothing buffer. Configure with milliseconds because that is easier
+# to reason about operationally. G.711 RTP frames here are 20ms/160 samples.
+OUTGOING_PREBUFFER_MS = _env_int("PYSIP_OUTGOING_PREBUFFER_MS", 80, minimum=0, maximum=1000)
+OUTGOING_PREBUFFER_FRAMES = max(0, round(OUTGOING_PREBUFFER_MS / 20))
+OUTGOING_MAX_DRAIN_FRAMES = _env_int("PYSIP_OUTGOING_MAX_DRAIN_FRAMES", 50, minimum=1, maximum=500)
 USE_AMD_APP = False  # Disabled for S2S mode - we need immediate audio passthrough
 DTMF_MODE = DTMFMode.RFC_2833
 
@@ -412,8 +430,8 @@ class RTPClient:
                     and len(self.__outgoing_buffer) < OUTGOING_PREBUFFER_FRAMES
                     and not self.__outgoing_stream_ended
                 ):
-                    # Build a small buffer before starting real audio. This adds
-                    # ~80ms latency but hides the recurring 20-40ms producer gaps
+                    # Build a small buffer before starting real audio. Default
+                    # is 80ms, configurable with PYSIP_OUTGOING_PREBUFFER_MS.
                     # seen in the diagnostics.
                     payload = self.generate_silence_frames(pre_encoded=pre_encoded_stream)
                     source = "silence_prebuffer"
