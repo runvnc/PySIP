@@ -57,7 +57,7 @@ class RTPWavRecorder:
         self._wav.setnchannels(self.channels)
         self._wav.setsampwidth(self.sample_width)
         self._wav.setframerate(self.sample_rate)
-        self._jsonl = open(self.jsonl_path, "a", buffering=1, encoding="utf-8")
+        self._jsonl = open(self.jsonl_path, "w", buffering=1, encoding="utf-8")
 
         self._lock = threading.RLock()
         self._closed = False
@@ -232,13 +232,13 @@ class RTPWavRecorder:
 
 
 def create_rtp_recorders(codec: CodecInfo, call_id: Optional[str] = None) -> Tuple[Optional[RTPWavRecorder], Optional[RTPWavRecorder], Optional[Path]]:
-    """Create incoming/outgoing recorders if PYSIP_RTP_RECORD is enabled."""
-    if not _truthy(os.environ.get("PYSIP_RTP_RECORD")):
-        return None, None, None
+    """Create incoming/outgoing recorders.
 
-    root = Path(os.environ.get("PYSIP_RTP_RECORD_DIR", "/tmp/pysip_rtp_recordings"))
-    session = f"{time.strftime('%Y%m%d_%H%M%S')}_{_safe_name(call_id)}"
-    session_dir = root / session
-    incoming = RTPWavRecorder(session_dir / "incoming_rtp.wav", codec, "incoming")
-    outgoing = RTPWavRecorder(session_dir / "outgoing_rtp.wav", codec, "outgoing")
-    return incoming, outgoing, session_dir
+    TEMPORARY DIAGNOSTIC MODE: always enabled, no env-var gate, and writes
+    directly to /tmp so it is obvious whether this PySIP build is active.
+    Each new RTPClient overwrites these files.
+    """
+    root = Path("/tmp")
+    incoming = RTPWavRecorder(root / "pysip_incoming_rtp.wav", codec, "incoming")
+    outgoing = RTPWavRecorder(root / "pysip_outgoing_rtp.wav", codec, "outgoing")
+    return incoming, outgoing, root

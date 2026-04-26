@@ -1,9 +1,3 @@
-# TEMPORARY SANITY CHECK: remove after VPS verifies it is loading this PySIP build.
-import sys as _pysip_sanity_sys
-_pysip_sanity_msg = "FATAL PYSIP SANITY CHECK: this is the temporary PySIP import-exit build from runvnc/PySIP after RTP recorder work. If you see this, the VPS is importing the new PySIP module."
-print(_pysip_sanity_msg, file=_pysip_sanity_sys.stderr, flush=True)
-raise SystemExit(_pysip_sanity_msg)
-
 import asyncio
 from collections import namedtuple
 from enum import Enum
