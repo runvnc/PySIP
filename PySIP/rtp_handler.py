@@ -28,6 +28,8 @@ MAX_WAIT_FOR_STREAM = 40  # seconds
 RTP_HEADER_LENGTH = 12
 RTP_PORT_RANGE = range(10_000, 20_000)
 SEND_SILENCE = True # send silence frames when no stream
+OUTGOING_PREBUFFER_FRAMES = 4  # 80ms smoothing buffer before playing a stream
+OUTGOING_MAX_DRAIN_FRAMES = 50  # prevent one loop from spending too long draining producer bursts
 USE_AMD_APP = False  # Disabled for S2S mode - we need immediate audio passthrough
 DTMF_MODE = DTMFMode.RFC_2833
 
@@ -129,8 +131,11 @@ class RTPClient:
         #self.__jitter_buffer = JitterBuffer(2, 0)
         self.__jitter_buffer = JitterBuffer(2, 0)
 
-        # Small buffer for outgoing audio to smooth backpressure artifacts
+        # Small buffer for outgoing audio to smooth upstream burst/gap artifacts.
         self.__outgoing_buffer = []
+        self.__outgoing_buffer_stream_id = None
+        self.__outgoing_stream_started = False
+        self.__outgoing_stream_ended = False
         self.__callbacks = callbacks
         self.__send_thread = None
         self.__recv_thread = None
@@ -353,46 +358,96 @@ class RTPClient:
             source = "unknown"
             pre_encoded = False
 
-            try:
-                if audio_stream is None:
-                    payload = self.generate_silence_frames()
-                    source = "silence_no_stream"
-                else:
-                    # Log only on first successful read from queue
-                    #if not hasattr(self, '_first_frame_logged'):
-                    #logger.log(logging.INFO, f"RTP send: frame read from queue, stream_id={audio_stream.stream_id}")
-                    self._first_frame_logged = True
-                    
-                    # Get frame from queue - may include timestamp
-                    item = audio_stream.input_q.get_nowait()
-                    
-                    # Unpack if tuple (frame, timestamp), otherwise just frame
+            pre_encoded_stream = bool(
+                audio_stream
+                and hasattr(audio_stream, 'pre_encoded')
+                and audio_stream.pre_encoded
+            )
+            outgoing_buffer_depth_before = len(self.__outgoing_buffer)
+
+            if audio_stream is None:
+                # No active producer: clear any stale buffered frames and send
+                # regular RTP silence at the normal 20ms cadence.
+                self.__outgoing_buffer.clear()
+                self.__outgoing_buffer_stream_id = None
+                self.__outgoing_stream_started = False
+                self.__outgoing_stream_ended = False
+                payload = self.generate_silence_frames()
+                source = "silence_no_stream"
+            else:
+                stream_id = getattr(audio_stream, 'stream_id', id(audio_stream))
+                if self.__outgoing_buffer_stream_id != stream_id:
+                    # New stream: start with a tiny playout buffer so upstream
+                    # burst/gap delivery does not become audible RTP chop.
+                    self.__outgoing_buffer.clear()
+                    self.__outgoing_buffer_stream_id = stream_id
+                    self.__outgoing_stream_started = False
+                    self.__outgoing_stream_ended = False
+
+                # Drain all currently available producer frames up to a sane cap.
+                # We still send only one RTP frame this loop; this only fills the
+                # smoothing buffer. Items may be raw payload or (payload, target_timestamp).
+                drained = 0
+                while drained < OUTGOING_MAX_DRAIN_FRAMES:
+                    try:
+                        item = audio_stream.input_q.get_nowait()
+                    except queue.Empty:
+                        break
+
+                    if item is None:
+                        self.__outgoing_stream_ended = True
+                        break
+
                     if isinstance(item, tuple):
-                        payload, target_timestamp = item
+                        frame_payload, frame_target_timestamp = item
                     else:
-                        payload = item
+                        frame_payload, frame_target_timestamp = item, None
+
+                    if frame_payload:
+                        self.__outgoing_buffer.append((frame_payload, frame_target_timestamp))
+                    drained += 1
+
+                if (
+                    not self.__outgoing_stream_started
+                    and len(self.__outgoing_buffer) < OUTGOING_PREBUFFER_FRAMES
+                    and not self.__outgoing_stream_ended
+                ):
+                    # Build a small buffer before starting real audio. This adds
+                    # ~80ms latency but hides the recurring 20-40ms producer gaps
+                    # seen in the diagnostics.
+                    payload = self.generate_silence_frames(pre_encoded=pre_encoded_stream)
+                    source = "silence_prebuffer"
+                    target_timestamp = None
+                elif self.__outgoing_buffer:
+                    payload, target_timestamp = self.__outgoing_buffer.pop(0)
+                    self.__outgoing_stream_started = True
                     source = "stream"
-                    
-            except queue.Empty:
-                # Keep RTP continuous even when an active audio stream's queue
-                # briefly runs dry between TTS chunks / speak() calls. Without
-                # this, SEND_SILENCE=True only works when audio_stream is None;
-                # Linphone may react badly to RTP gaps and produce flutter/echo
-                # artifacts when real audio resumes.
-                if SEND_SILENCE:
-                    payload = self.generate_silence_frames(
-                        pre_encoded=bool(
-                            audio_stream
-                            and hasattr(audio_stream, 'pre_encoded')
-                            and audio_stream.pre_encoded
-                        )
+                    self._first_frame_logged = True
+                elif self.__outgoing_stream_ended:
+                    logger.log(
+                        logging.DEBUG,
+                        f"Sent all buffered frames from source with id: {audio_stream.stream_id}",
                     )
+                    try:
+                        loop.call_soon_threadsafe(audio_stream.stream_done)
+                        self.__outgoing_buffer_stream_id = None
+                        self.__outgoing_stream_started = False
+                        self.__outgoing_stream_ended = False
+                        self.__outgoing_buffer.clear()
+                        time.sleep(0.02)
+                        continue
+                    except RuntimeError:
+                        break
+                elif SEND_SILENCE:
+                    # Active stream temporarily underruns even after smoothing.
+                    payload = self.generate_silence_frames(pre_encoded=pre_encoded_stream)
                     source = "silence_underrun"
                     target_timestamp = None
                 else:
-                    # Don't log every empty queue check
                     time.sleep(0.02)
                     continue
+
+            outgoing_buffer_depth_after = len(self.__outgoing_buffer)
             
             # DISABLED: Outgoing buffer for smoothing - testing without it
             # Add to outgoing buffer for smoothing (6 frame buffer = 120ms)
@@ -449,6 +504,8 @@ class RTPClient:
                         rtp_sequence_number=self.__sequence_number,
                         rtp_timestamp=self.__timestamp,
                         encoded_payload_len=len(encoded_payload) if encoded_payload else 0,
+                        outgoing_buffer_depth_before=outgoing_buffer_depth_before,
+                        outgoing_buffer_depth_after=outgoing_buffer_depth_after,
                     )
                 except Exception:
                     logger.log(logging.WARNING, "Failed to record outgoing input frame", exc_info=True)
@@ -473,6 +530,8 @@ class RTPClient:
                             source=source,
                             pre_encoded=pre_encoded,
                             target_timestamp=target_timestamp,
+                            outgoing_buffer_depth_before=outgoing_buffer_depth_before,
+                            outgoing_buffer_depth_after=outgoing_buffer_depth_after,
                         )
                     except Exception:
                         logger.log(logging.WARNING, "Failed to record outgoing RTP packet", exc_info=True)
@@ -484,39 +543,24 @@ class RTPClient:
                     pass
                 logger.log(logging.ERROR, "Failed to send RTP Packet", exc_info=True)
 
-            # Calculate sleep time based on timestamp if provided
+            # Always pace outgoing RTP at codec frame duration.  Upstream
+            # target_timestamp is useful metadata, but using it for catch-up
+            # scheduling caused real audio bursts to be sent faster than 20ms
+            # packet cadence whenever producer timestamps arrived stale.
             if target_timestamp is not None:
-                # Use provided timestamp for precise timing
-                current_time = time.perf_counter()
-                sleep_time = target_timestamp - current_time
-                
-                # Monitor timestamp drift
-                if sleep_time < -0.05:  # More than 50ms behind
-                    logger.log(logging.CRITICAL, 
-                              f"RTP: Timestamp in the past! Drift: {-sleep_time*1000:.1f}ms - audio may sound rushed")
-                    sleep_time = 0  # Send immediately, try to catch up
-                elif sleep_time > 0.5:  # More than 500ms ahead
-                    logger.log(logging.WARNING,
-                              f"RTP: Timestamp too far ahead: {sleep_time*1000:.1f}ms - may cause latency")
-                elif sleep_time < 0:
-                    # Slightly behind but not critical, just catch up
-                    sleep_time = 0
-                
-                # Use timestamp-based timing
-                self.__sequence_number = (self.__sequence_number + 1) % 65535
-                self.__timestamp = (self.__timestamp + len(encoded_payload)) % 4294967295
-                time.sleep(max(0, sleep_time))
-            else:
-                # Fallback to original timing if no timestamp provided
-                delay = (1 / self.selected_codec.rate) * 160
-                #delay -= 0.002  # compensate for processing time (causes apparent response delay)
-                processing_time = (time.monotonic_ns() - start_processing) / 1e9
-                sleep_time = delay - processing_time
-                sleep_time = max(0, sleep_time)
-                self.__sequence_number = (self.__sequence_number + 1) % 65535  # Wrap around at 2^16 - 1
-                self.__timestamp = (self.__timestamp + len(encoded_payload)) % 4294967295  # Wrap around at 2^32 -1
+                target_drift_ms = (target_timestamp - time.perf_counter()) * 1000.0
+                if target_drift_ms < -50:
+                    logger.log(
+                        logging.DEBUG,
+                        f"RTP: upstream target timestamp behind by {-target_drift_ms:.1f}ms; preserving RTP pacing",
+                    )
 
-                time.sleep(sleep_time)
+            delay = (1 / self.selected_codec.rate) * 160
+            processing_time = (time.monotonic_ns() - start_processing) / 1e9
+            sleep_time = max(0, delay - processing_time)
+            self.__sequence_number = (self.__sequence_number + 1) % 65535  # Wrap around at 2^16 - 1
+            self.__timestamp = (self.__timestamp + len(encoded_payload)) % 4294967295  # Wrap around at 2^32 -1
+            time.sleep(sleep_time)
         
         logger.log(logging.DEBUG, "Sender thread has been successfully closed") 
 
