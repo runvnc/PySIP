@@ -65,10 +65,13 @@ OUTGOING_ADAPTIVE_BUFFER = _env_bool("PYSIP_OUTGOING_ADAPTIVE_BUFFER", True)
 OUTGOING_ADAPTIVE_SHRINK_AFTER_FRAMES = _env_int("PYSIP_OUTGOING_ADAPTIVE_SHRINK_AFTER_FRAMES", 100, minimum=10, maximum=5000)
 OUTGOING_MAX_DRAIN_FRAMES = _env_int("PYSIP_OUTGOING_MAX_DRAIN_FRAMES", 50, minimum=1, maximum=500)
 
-# Incoming jitter buffer before audio is emitted to app/STT callbacks. Capacity
-# must be a power of 2 for JitterBuffer; round up to avoid config footguns.
+# Incoming jitter buffer before audio is emitted to app/STT callbacks.
+# Default remains the original low-latency capacity=2. Increase with
+# PYSIP_INCOMING_JITTER_BUFFER_CAPACITY only if incoming RTP jitter/reordering
+# is proven to be damaging STT input. Capacity must be a power of 2 for
+# JitterBuffer; round up to avoid config footguns.
 INCOMING_JITTER_BUFFER_CAPACITY = _next_power_of_two(
-    _env_int("PYSIP_INCOMING_JITTER_BUFFER_CAPACITY", 8, minimum=2, maximum=128)
+    _env_int("PYSIP_INCOMING_JITTER_BUFFER_CAPACITY", 2, minimum=2, maximum=128)
 )
 INCOMING_JITTER_BUFFER_PREFETCH = _env_int("PYSIP_INCOMING_JITTER_BUFFER_PREFETCH", 0, minimum=0, maximum=16)
 USE_AMD_APP = False  # Disabled for S2S mode - we need immediate audio passthrough
