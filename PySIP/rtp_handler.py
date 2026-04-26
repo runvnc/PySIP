@@ -43,11 +43,34 @@ def _env_int(name: str, default: int, minimum: int | None = None, maximum: int |
     return value
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on", "y")
+
+
+def _next_power_of_two(value: int) -> int:
+    value = max(1, int(value))
+    return 1 << (value - 1).bit_length()
+
+
 # Outgoing smoothing buffer. Configure with milliseconds because that is easier
 # to reason about operationally. G.711 RTP frames here are 20ms/160 samples.
-OUTGOING_PREBUFFER_MS = _env_int("PYSIP_OUTGOING_PREBUFFER_MS", 80, minimum=0, maximum=1000)
+OUTGOING_PREBUFFER_MS = _env_int("PYSIP_OUTGOING_PREBUFFER_MS", 40, minimum=0, maximum=1000)
 OUTGOING_PREBUFFER_FRAMES = max(0, round(OUTGOING_PREBUFFER_MS / 20))
+OUTGOING_MAX_PREBUFFER_MS = _env_int("PYSIP_OUTGOING_MAX_PREBUFFER_MS", 160, minimum=OUTGOING_PREBUFFER_MS, maximum=2000)
+OUTGOING_MAX_PREBUFFER_FRAMES = max(OUTGOING_PREBUFFER_FRAMES, round(OUTGOING_MAX_PREBUFFER_MS / 20))
+OUTGOING_ADAPTIVE_BUFFER = _env_bool("PYSIP_OUTGOING_ADAPTIVE_BUFFER", True)
+OUTGOING_ADAPTIVE_SHRINK_AFTER_FRAMES = _env_int("PYSIP_OUTGOING_ADAPTIVE_SHRINK_AFTER_FRAMES", 100, minimum=10, maximum=5000)
 OUTGOING_MAX_DRAIN_FRAMES = _env_int("PYSIP_OUTGOING_MAX_DRAIN_FRAMES", 50, minimum=1, maximum=500)
+
+# Incoming jitter buffer before audio is emitted to app/STT callbacks. Capacity
+# must be a power of 2 for JitterBuffer; round up to avoid config footguns.
+INCOMING_JITTER_BUFFER_CAPACITY = _next_power_of_two(
+    _env_int("PYSIP_INCOMING_JITTER_BUFFER_CAPACITY", 8, minimum=2, maximum=128)
+)
+INCOMING_JITTER_BUFFER_PREFETCH = _env_int("PYSIP_INCOMING_JITTER_BUFFER_PREFETCH", 0, minimum=0, maximum=16)
 USE_AMD_APP = False  # Disabled for S2S mode - we need immediate audio passthrough
 DTMF_MODE = DTMFMode.RFC_2833
 
@@ -145,15 +168,20 @@ class RTPClient:
         self.ssrc = ssrc
         self.__timestamp = random.randint(2000, 8000)
         self.__sequence_number = random.randint(200, 800)
-        # Jitter buffer for incoming audio
-        #self.__jitter_buffer = JitterBuffer(2, 0)
-        self.__jitter_buffer = JitterBuffer(2, 0)
+        # Jitter buffer for incoming audio before app/STT callbacks.
+        self.__jitter_buffer = JitterBuffer(
+            INCOMING_JITTER_BUFFER_CAPACITY,
+            INCOMING_JITTER_BUFFER_PREFETCH,
+        )
 
         # Small buffer for outgoing audio to smooth upstream burst/gap artifacts.
         self.__outgoing_buffer = []
         self.__outgoing_buffer_stream_id = None
         self.__outgoing_stream_started = False
         self.__outgoing_stream_ended = False
+        self.__outgoing_current_prebuffer_frames = OUTGOING_PREBUFFER_FRAMES
+        self.__outgoing_stable_frames = 0
+        self.__outgoing_underruns = 0
         self.__callbacks = callbacks
         self.__send_thread = None
         self.__recv_thread = None
@@ -390,6 +418,9 @@ class RTPClient:
                 self.__outgoing_buffer_stream_id = None
                 self.__outgoing_stream_started = False
                 self.__outgoing_stream_ended = False
+                self.__outgoing_current_prebuffer_frames = OUTGOING_PREBUFFER_FRAMES
+                self.__outgoing_stable_frames = 0
+                self.__outgoing_underruns = 0
                 payload = self.generate_silence_frames()
                 source = "silence_no_stream"
             else:
@@ -401,6 +432,9 @@ class RTPClient:
                     self.__outgoing_buffer_stream_id = stream_id
                     self.__outgoing_stream_started = False
                     self.__outgoing_stream_ended = False
+                    self.__outgoing_current_prebuffer_frames = OUTGOING_PREBUFFER_FRAMES
+                    self.__outgoing_stable_frames = 0
+                    self.__outgoing_underruns = 0
 
                 # Drain all currently available producer frames up to a sane cap.
                 # We still send only one RTP frame this loop; this only fills the
@@ -427,7 +461,7 @@ class RTPClient:
 
                 if (
                     not self.__outgoing_stream_started
-                    and len(self.__outgoing_buffer) < OUTGOING_PREBUFFER_FRAMES
+                    and len(self.__outgoing_buffer) < self.__outgoing_current_prebuffer_frames
                     and not self.__outgoing_stream_ended
                 ):
                     # Build a small buffer before starting real audio. Default
@@ -439,6 +473,14 @@ class RTPClient:
                 elif self.__outgoing_buffer:
                     payload, target_timestamp = self.__outgoing_buffer.pop(0)
                     self.__outgoing_stream_started = True
+                    self.__outgoing_stable_frames += 1
+                    if (
+                        OUTGOING_ADAPTIVE_BUFFER
+                        and self.__outgoing_current_prebuffer_frames > OUTGOING_PREBUFFER_FRAMES
+                        and self.__outgoing_stable_frames >= OUTGOING_ADAPTIVE_SHRINK_AFTER_FRAMES
+                    ):
+                        self.__outgoing_current_prebuffer_frames -= 1
+                        self.__outgoing_stable_frames = 0
                     source = "stream"
                     self._first_frame_logged = True
                 elif self.__outgoing_stream_ended:
@@ -451,6 +493,9 @@ class RTPClient:
                         self.__outgoing_buffer_stream_id = None
                         self.__outgoing_stream_started = False
                         self.__outgoing_stream_ended = False
+                        self.__outgoing_current_prebuffer_frames = OUTGOING_PREBUFFER_FRAMES
+                        self.__outgoing_stable_frames = 0
+                        self.__outgoing_underruns = 0
                         self.__outgoing_buffer.clear()
                         time.sleep(0.02)
                         continue
@@ -458,8 +503,22 @@ class RTPClient:
                         break
                 elif SEND_SILENCE:
                     # Active stream temporarily underruns even after smoothing.
+                    # In adaptive mode, grow the playout cushion and require it
+                    # to refill before playing real audio again. This hides
+                    # recurring producer gaps without forcing high fixed latency
+                    # for stable providers.
+                    self.__outgoing_underruns += 1
+                    self.__outgoing_stable_frames = 0
+                    if OUTGOING_ADAPTIVE_BUFFER:
+                        self.__outgoing_current_prebuffer_frames = min(
+                            OUTGOING_MAX_PREBUFFER_FRAMES,
+                            self.__outgoing_current_prebuffer_frames + 1,
+                        )
+                        self.__outgoing_stream_started = False
+                        source = "silence_adaptive_rebuffer"
+                    else:
+                        source = "silence_underrun"
                     payload = self.generate_silence_frames(pre_encoded=pre_encoded_stream)
-                    source = "silence_underrun"
                     target_timestamp = None
                 else:
                     time.sleep(0.02)
@@ -524,6 +583,8 @@ class RTPClient:
                         encoded_payload_len=len(encoded_payload) if encoded_payload else 0,
                         outgoing_buffer_depth_before=outgoing_buffer_depth_before,
                         outgoing_buffer_depth_after=outgoing_buffer_depth_after,
+                        outgoing_current_prebuffer_frames=self.__outgoing_current_prebuffer_frames,
+                        outgoing_underruns=self.__outgoing_underruns,
                     )
                 except Exception:
                     logger.log(logging.WARNING, "Failed to record outgoing input frame", exc_info=True)
@@ -550,6 +611,8 @@ class RTPClient:
                             target_timestamp=target_timestamp,
                             outgoing_buffer_depth_before=outgoing_buffer_depth_before,
                             outgoing_buffer_depth_after=outgoing_buffer_depth_after,
+                            outgoing_current_prebuffer_frames=self.__outgoing_current_prebuffer_frames,
+                            outgoing_underruns=self.__outgoing_underruns,
                         )
                     except Exception:
                         logger.log(logging.WARNING, "Failed to record outgoing RTP packet", exc_info=True)
