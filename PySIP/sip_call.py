@@ -1036,6 +1036,7 @@ class SipCall:
                 TransmitType.SENDRECV,
                 local_sdp.ssrc,
                 self._callbacks,
+                call_id=self.call_id,
             )
             # start the session
             _rtp_task = asyncio.create_task(self._rtp_session._start())

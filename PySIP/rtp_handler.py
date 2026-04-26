@@ -21,6 +21,7 @@ from .utils.logger import logger
 from .utils.inband_dtmf import dtmf_decode
 from .codecs import get_encoder, get_decoder, CODECS
 from .codecs.codec_info import CodecInfo
+from .rtp_recorder import create_rtp_recorders
 
 
 MAX_WAIT_FOR_STREAM = 40  # seconds
@@ -92,7 +93,8 @@ class TransmitType(Enum):
 class RTPClient:
     def __init__(
         self, offered_codecs, src_ip, src_port, dst_ip, dst_port, transmit_type, ssrc,
-        callbacks: Optional[Dict[str, List[Callable]]] = None
+        callbacks: Optional[Dict[str, List[Callable]]] = None,
+        call_id: Optional[str] = None,
     ):
         self.offered_codecs = offered_codecs
         self.src_ip = src_ip
@@ -109,6 +111,16 @@ class RTPClient:
         self._audio_stream: Optional[AudioStream] = None
         self.__encoder = get_encoder(self.selected_codec)
         self.__decoder = get_decoder(self.selected_codec)
+        self.call_id = call_id
+        self.__incoming_recorder = None
+        self.__outgoing_recorder = None
+        self.__recording_dir = None
+        try:
+            self.__incoming_recorder, self.__outgoing_recorder, self.__recording_dir = create_rtp_recorders(self.selected_codec, call_id)
+            if self.__recording_dir:
+                logger.log(logging.INFO, f"RTP diagnostic recording enabled: {self.__recording_dir}")
+        except Exception:
+            logger.log(logging.WARNING, "Failed to initialize RTP diagnostic recorders", exc_info=True)
         self.ssrc = ssrc
         self.__timestamp = random.randint(2000, 8000)
         self.__sequence_number = random.randint(200, 800)
@@ -223,6 +235,13 @@ class RTPClient:
         for t in self.__all_threads:
             await asyncio.to_thread(t.join)
 
+        for recorder in (self.__incoming_recorder, self.__outgoing_recorder):
+            if recorder:
+                try:
+                    await asyncio.to_thread(recorder.close)
+                except Exception:
+                    logger.log(logging.WARNING, "Failed to close RTP diagnostic recorder", exc_info=True)
+
     async def _wait_stopped(self):
         while True:
             if not self.is_running.is_set():
@@ -330,9 +349,13 @@ class RTPClient:
             # Initialize target_timestamp to None before try block
             target_timestamp = None
 
+            source = "unknown"
+            pre_encoded = False
+
             try:
                 if audio_stream is None:
                     payload = self.generate_silence_frames()
+                    source = "silence_no_stream"
                 else:
                     # Log only on first successful read from queue
                     #if not hasattr(self, '_first_frame_logged'):
@@ -347,6 +370,7 @@ class RTPClient:
                         payload, target_timestamp = item
                     else:
                         payload = item
+                    source = "stream"
                     
             except queue.Empty:
                 # Keep RTP continuous even when an active audio stream's queue
@@ -362,6 +386,7 @@ class RTPClient:
                             and audio_stream.pre_encoded
                         )
                     )
+                    source = "silence_underrun"
                     target_timestamp = None
                 else:
                     # Don't log every empty queue check
@@ -406,22 +431,41 @@ class RTPClient:
             if audio_stream and hasattr(audio_stream, 'pre_encoded') and audio_stream.pre_encoded:
                 # Audio is already encoded (e.g., ulaw from OpenAI), use it directly
                 encoded_payload = payload
+                pre_encoded = True
             else:
                 # Audio needs encoding (e.g., PCM16 to ulaw)
                 encoded_payload = self.__encoder.encode(payload)
-            packet = RtpPacket(
+                pre_encoded = False
+            rtp_packet = RtpPacket(
                 payload_type=self.selected_codec,
                 payload=encoded_payload,
                 sequence_number=self.__sequence_number,
                 timestamp=self.__timestamp,
                 ssrc=self.ssrc,
-            ).serialize()
+            )
+            packet = rtp_packet.serialize()
             try:
                 self.__rtp_socket.setblocking(True)
                 self.__rtp_socket.sendto(packet, (self.dst_ip, self.dst_port))
+                send_wall_time = time.perf_counter()
                 self.__rtp_socket.setblocking(False)
+                if self.__outgoing_recorder:
+                    try:
+                        self.__outgoing_recorder.record_packet(
+                            rtp_packet,
+                            send_wall_time,
+                            source=source,
+                            pre_encoded=pre_encoded,
+                            target_timestamp=target_timestamp,
+                        )
+                    except Exception:
+                        logger.log(logging.WARNING, "Failed to record outgoing RTP packet", exc_info=True)
                 #logging.log(logging.DEBUG, f"Sent RTP Packet: Seq={self.__sequence_number}, Timestamp={self.__timestamp}, PayloadType={self.selected_codec}, Size={len(packet)} bytes")
             except OSError:
+                try:
+                    self.__rtp_socket.setblocking(False)
+                except Exception:
+                    pass
                 logger.log(logging.ERROR, "Failed to send RTP Packet", exc_info=True)
 
             # Calculate sleep time based on timestamp if provided
@@ -494,6 +538,12 @@ class RTPClient:
                     logger.log(logging.WARNING, f"Unsupported codecs received, {packet.payload_type}")
                     time.sleep(0.01)
                     continue
+
+                if self.__incoming_recorder and packet.payload_type != CodecInfo.EVENT:
+                    try:
+                        self.__incoming_recorder.record_packet(packet, time.perf_counter())
+                    except Exception:
+                        logger.log(logging.WARNING, "Failed to record incoming RTP packet", exc_info=True)
 
                 encoded_frame = self.__jitter_buffer.add(packet)
                 # if we have enough encoded buffer then decode
