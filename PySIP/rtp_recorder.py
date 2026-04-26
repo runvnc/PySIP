@@ -231,7 +231,131 @@ class RTPWavRecorder:
                     self._wav.close()
 
 
-def create_rtp_recorders(codec: CodecInfo, call_id: Optional[str] = None) -> Tuple[Optional[RTPWavRecorder], Optional[RTPWavRecorder], Optional[Path]]:
+class OutgoingInputWavRecorder:
+    """Records the pre-RTP outgoing audio as consumed by RTPClient.send().
+
+    This is the diagnostic counterpart to outgoing_rtp.wav. It records the
+    payload before PySIP's encode/packetize/send step, while still preserving
+    the send-loop timeline by writing the generated silence frames when PySIP
+    has no active stream or the active stream queue underruns.
+    """
+
+    def __init__(self, wav_path: str | Path, codec: CodecInfo, direction: str = "outgoing_input"):
+        self.wav_path = Path(wav_path)
+        self.jsonl_path = self.wav_path.with_suffix(".jsonl")
+        self.codec = codec
+        self.direction = direction
+        self.decoder = get_decoder(codec)
+        self.sample_rate = int(codec.rate or 8000)
+        self.sample_width = 2
+        self.channels = 1
+
+        self.wav_path.parent.mkdir(parents=True, exist_ok=True)
+        self._wav = wave.open(str(self.wav_path), "wb")
+        self._wav.setnchannels(self.channels)
+        self._wav.setsampwidth(self.sample_width)
+        self._wav.setframerate(self.sample_rate)
+        self._jsonl = open(self.jsonl_path, "w", buffering=1, encoding="utf-8")
+
+        self._lock = threading.RLock()
+        self._closed = False
+        self._frame_count = 0
+        self._written_samples = 0
+        self._last_wall_time: Optional[float] = None
+
+    def record_input_frame(
+        self,
+        payload: bytes,
+        *,
+        wall_time: Optional[float] = None,
+        source: str = "unknown",
+        pre_encoded: bool = False,
+        target_timestamp: Optional[float] = None,
+        rtp_sequence_number: Optional[int] = None,
+        rtp_timestamp: Optional[int] = None,
+        **extra: Any,
+    ) -> None:
+        if wall_time is None:
+            wall_time = time.perf_counter()
+
+        with self._lock:
+            if self._closed:
+                return
+
+            payload = payload or b""
+            payload_len = len(payload)
+            wall_delta_ms = None
+            if self._last_wall_time is not None:
+                wall_delta_ms = (wall_time - self._last_wall_time) * 1000.0
+
+            decode_error = None
+            if pre_encoded:
+                try:
+                    pcm = self.decoder.decode(payload)
+                except Exception as exc:
+                    pcm = b""
+                    decode_error = repr(exc)
+            else:
+                # Upstream/non-pre-encoded path is expected to be PCM16 already.
+                pcm = payload
+                if len(pcm) % self.sample_width:
+                    pcm = pcm[:-1]
+                    decode_error = "odd_length_pcm16_truncated"
+
+            decoded_samples = len(pcm) // self.sample_width
+            if pcm:
+                self._wav.writeframes(pcm)
+                self._written_samples += decoded_samples
+
+            self._frame_count += 1
+            self._write_jsonl({
+                "direction": self.direction,
+                "event": "input_frame",
+                "frame_index": self._frame_count,
+                "wall_time": wall_time,
+                "wall_delta_ms": wall_delta_ms,
+                "source": source,
+                "pre_encoded": pre_encoded,
+                "payload_len": payload_len,
+                "decoded_samples": decoded_samples,
+                "target_timestamp": target_timestamp,
+                "rtp_sequence_number": rtp_sequence_number,
+                "rtp_timestamp": rtp_timestamp,
+                "written_samples_total": self._written_samples,
+                "decode_error": decode_error,
+                **extra,
+            })
+            self._last_wall_time = wall_time
+
+    def _write_jsonl(self, event: dict[str, Any]) -> None:
+        try:
+            self._jsonl.write(json.dumps(event, sort_keys=True, default=str) + "\n")
+        except Exception:
+            pass
+
+    def close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            try:
+                self._write_jsonl({
+                    "direction": self.direction,
+                    "event": "close",
+                    "frame_count": self._frame_count,
+                    "written_samples_total": self._written_samples,
+                    "duration_seconds": self._written_samples / float(self.sample_rate),
+                    "wav_path": str(self.wav_path),
+                    "jsonl_path": str(self.jsonl_path),
+                })
+            finally:
+                try:
+                    self._jsonl.close()
+                finally:
+                    self._wav.close()
+
+
+def create_rtp_recorders(codec: CodecInfo, call_id: Optional[str] = None) -> Tuple[Optional[RTPWavRecorder], Optional[RTPWavRecorder], Optional[OutgoingInputWavRecorder], Optional[Path]]:
     """Create incoming/outgoing recorders.
 
     TEMPORARY DIAGNOSTIC MODE: always enabled, no env-var gate, and writes
@@ -239,6 +363,7 @@ def create_rtp_recorders(codec: CodecInfo, call_id: Optional[str] = None) -> Tup
     Each new RTPClient overwrites these files.
     """
     root = Path("/tmp")
-    incoming = RTPWavRecorder(root / "pysip_incoming_rtp.wav", codec, "incoming")
-    outgoing = RTPWavRecorder(root / "pysip_outgoing_rtp.wav", codec, "outgoing")
-    return incoming, outgoing, root
+    incoming = RTPWavRecorder(root / "pysip_phone_incoming_rtp.wav", codec, "phone_incoming")
+    outgoing = RTPWavRecorder(root / "pysip_outgoing_rtp.wav", codec, "outgoing_rtp")
+    outgoing_input = OutgoingInputWavRecorder(root / "pysip_outgoing_input.wav", codec, "outgoing_input")
+    return incoming, outgoing, outgoing_input, root

@@ -114,9 +114,10 @@ class RTPClient:
         self.call_id = call_id
         self.__incoming_recorder = None
         self.__outgoing_recorder = None
+        self.__outgoing_input_recorder = None
         self.__recording_dir = None
         try:
-            self.__incoming_recorder, self.__outgoing_recorder, self.__recording_dir = create_rtp_recorders(self.selected_codec, call_id)
+            self.__incoming_recorder, self.__outgoing_recorder, self.__outgoing_input_recorder, self.__recording_dir = create_rtp_recorders(self.selected_codec, call_id)
             if self.__recording_dir:
                 logger.log(logging.INFO, f"RTP diagnostic recording enabled: {self.__recording_dir}")
         except Exception:
@@ -235,7 +236,7 @@ class RTPClient:
         for t in self.__all_threads:
             await asyncio.to_thread(t.join)
 
-        for recorder in (self.__incoming_recorder, self.__outgoing_recorder):
+        for recorder in (self.__incoming_recorder, self.__outgoing_recorder, self.__outgoing_input_recorder):
             if recorder:
                 try:
                     await asyncio.to_thread(recorder.close)
@@ -436,6 +437,21 @@ class RTPClient:
                 # Audio needs encoding (e.g., PCM16 to ulaw)
                 encoded_payload = self.__encoder.encode(payload)
                 pre_encoded = False
+
+            if self.__outgoing_input_recorder:
+                try:
+                    self.__outgoing_input_recorder.record_input_frame(
+                        payload,
+                        wall_time=time.perf_counter(),
+                        source=source,
+                        pre_encoded=pre_encoded,
+                        target_timestamp=target_timestamp,
+                        rtp_sequence_number=self.__sequence_number,
+                        rtp_timestamp=self.__timestamp,
+                        encoded_payload_len=len(encoded_payload) if encoded_payload else 0,
+                    )
+                except Exception:
+                    logger.log(logging.WARNING, "Failed to record outgoing input frame", exc_info=True)
             rtp_packet = RtpPacket(
                 payload_type=self.selected_codec,
                 payload=encoded_payload,
