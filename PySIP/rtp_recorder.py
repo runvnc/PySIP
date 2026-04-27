@@ -356,13 +356,22 @@ class OutgoingInputWavRecorder:
 
 
 def create_rtp_recorders(codec: CodecInfo, call_id: Optional[str] = None) -> Tuple[Optional[RTPWavRecorder], Optional[RTPWavRecorder], Optional[OutgoingInputWavRecorder], Optional[Path]]:
-    """Create incoming/outgoing recorders.
+    """Create optional RTP diagnostic recorders.
 
-    TEMPORARY DIAGNOSTIC MODE: always enabled, no env-var gate, and writes
-    directly to /tmp so it is obvious whether this PySIP build is active.
-    Each new RTPClient overwrites these files.
+    Recording is disabled by default. Enable it with::
+
+        PYSIP_RTP_RECORD=1
+        PYSIP_RTP_RECORD_DIR=/tmp/pysip_rtp_recordings
+
+    Files are named the same as the temporary diagnostics used during the RTP
+    pacing investigation, but now live under the configured directory.
     """
-    root = Path("/tmp")
+    enabled = os.environ.get("PYSIP_RTP_RECORD", "").strip().lower() in {"1", "true", "yes", "on"}
+    if not enabled:
+        return None, None, None, None
+
+    root = Path(os.environ.get("PYSIP_RTP_RECORD_DIR", "/tmp/pysip_rtp_recordings"))
+    root.mkdir(parents=True, exist_ok=True)
     incoming = RTPWavRecorder(root / "pysip_phone_incoming_rtp.wav", codec, "phone_incoming")
     outgoing = RTPWavRecorder(root / "pysip_outgoing_rtp.wav", codec, "outgoing_rtp")
     outgoing_input = OutgoingInputWavRecorder(root / "pysip_outgoing_input.wav", codec, "outgoing_input")
