@@ -54,10 +54,11 @@ def _next_power_of_two(value: int) -> int:
     value = max(1, int(value))
     return 1 << (value - 1).bit_length()
 
+# to reason about operationally. G.711 RTP frames here are 20ms/160 samples.
 
 # Outgoing smoothing buffer. Configure with milliseconds because that is easier
 # to reason about operationally. G.711 RTP frames here are 20ms/160 samples.
-OUTGOING_PREBUFFER_MS = _env_int("PYSIP_OUTGOING_PREBUFFER_MS", 40, minimum=0, maximum=1000)
+OUTGOING_PREBUFFER_MS = _env_int("PYSIP_OUTGOING_PREBUFFER_MS", 20, minimum=0, maximum=1000)
 OUTGOING_PREBUFFER_FRAMES = max(0, round(OUTGOING_PREBUFFER_MS / 20))
 OUTGOING_MAX_PREBUFFER_MS = _env_int("PYSIP_OUTGOING_MAX_PREBUFFER_MS", 160, minimum=OUTGOING_PREBUFFER_MS, maximum=2000)
 OUTGOING_MAX_PREBUFFER_FRAMES = max(OUTGOING_PREBUFFER_FRAMES, round(OUTGOING_MAX_PREBUFFER_MS / 20))
