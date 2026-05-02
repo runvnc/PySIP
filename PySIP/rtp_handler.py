@@ -514,8 +514,18 @@ class RTPClient:
                             and hasattr(audio_stream, '_e2e_vad_eager_end_pc')
                             and audio_stream._e2e_vad_eager_end_pc is not None):
                             e2e_ms = (self.__e2e_first_rtp_sent_pc - audio_stream._e2e_vad_eager_end_pc) * 1000
+                            # User-perceived e2e: from when user actually stopped speaking
+                            # (last speech audio time) not from when VAD decided (which is
+                            # eager_silence_ms later)
+                            user_speech_end_pc = getattr(audio_stream, '_e2e_user_speech_end_pc', None)
+                            if user_speech_end_pc is not None and user_speech_end_pc > 0:
+                                user_e2e_ms = (self.__e2e_first_rtp_sent_pc - user_speech_end_pc) * 1000
+                            else:
+                                user_e2e_ms = e2e_ms
+                            utt_num = getattr(audio_stream, '_e2e_vad_utterance_num', 0)
                             _e2e_log('E2E_LATENCY', utterance_num=utt_num,
                                      e2e_ms=f'{e2e_ms:.0f}',
+                                     user_e2e_ms=f'{user_e2e_ms:.0f}',
                                      vad_eager_end_pc=audio_stream._e2e_vad_eager_end_pc,
                                      rtp_sent_pc=self.__e2e_first_rtp_sent_pc,
                                      prebuffer_frames=self.__outgoing_current_prebuffer_frames)
