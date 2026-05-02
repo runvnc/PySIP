@@ -29,14 +29,14 @@ from .rtp_recorder import create_rtp_recorders
 E2E_LATENCY_LOG = '/tmp/sip_e2e_latency.log'
 
 
-def _e2e_log(event: str, **kwargs):
+def _e2e_log(event: str, utterance_num: int = 0, **kwargs):
     """Log an end-to-end latency event with perf_counter timestamp."""
     from datetime import datetime
     now = datetime.now()
     ts = now.strftime('%Y-%m-%d %H:%M:%S') + f'.{now.microsecond // 1000:03d}'
     pc = time.perf_counter()
     extra = ' '.join(f'{k}={v}' for k, v in kwargs.items())
-    line = f'[{ts}] [E2E] {event} perf_counter={pc:.6f} {extra}'
+    line = f'[{ts}] [E2E] {event} perf_counter={pc:.6f} utterance={utterance_num} {extra}'
     try:
         with open(E2E_LATENCY_LOG, 'a') as f:
             f.write(line + '\n')
@@ -505,6 +505,7 @@ class RTPClient:
                     self.__outgoing_stable_frames += 1
                     if not self.__e2e_first_rtp_sent_logged:
                         self.__e2e_first_rtp_sent_pc = time.perf_counter()
+                        utt_num = getattr(audio_stream, '_e2e_vad_utterance_num', 0)
                         _e2e_log('FIRST_RTP_SENT', prebuffer_frames=self.__outgoing_current_prebuffer_frames,
                                  buffer_depth=len(self.__outgoing_buffer))
                         self.__e2e_first_rtp_sent_logged = True
@@ -513,7 +514,6 @@ class RTPClient:
                             and hasattr(audio_stream, '_e2e_vad_eager_end_pc')
                             and audio_stream._e2e_vad_eager_end_pc is not None):
                             e2e_ms = (self.__e2e_first_rtp_sent_pc - audio_stream._e2e_vad_eager_end_pc) * 1000
-                            utt_num = getattr(audio_stream, '_e2e_vad_utterance_num', 0)
                             _e2e_log('E2E_LATENCY', utterance_num=utt_num,
                                      e2e_ms=f'{e2e_ms:.0f}',
                                      vad_eager_end_pc=audio_stream._e2e_vad_eager_end_pc,
