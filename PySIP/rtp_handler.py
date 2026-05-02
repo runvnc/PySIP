@@ -7,6 +7,7 @@ import os
 import queue
 import random
 import socket
+import json as _json
 from struct import unpack, unpack_from
 import time
 import threading
@@ -23,6 +24,25 @@ from .utils.inband_dtmf import dtmf_decode
 from .codecs import get_encoder, get_decoder, CODECS
 from .codecs.codec_info import CodecInfo
 from .rtp_recorder import create_rtp_recorders
+
+# End-to-end latency log (shared across mr_sip + PySIP)
+E2E_LATENCY_LOG = '/tmp/sip_e2e_latency.log'
+
+
+def _e2e_log(event: str, **kwargs):
+    """Log an end-to-end latency event with perf_counter timestamp."""
+    from datetime import datetime
+    now = datetime.now()
+    ts = now.strftime('%Y-%m-%d %H:%M:%S') + f'.{now.microsecond // 1000:03d}'
+    pc = time.perf_counter()
+    extra = ' '.join(f'{k}={v}' for k, v in kwargs.items())
+    line = f'[{ts}] [E2E] {event} perf_counter={pc:.6f} {extra}'
+    try:
+        with open(E2E_LATENCY_LOG, 'a') as f:
+            f.write(line + '\n')
+            f.flush()
+    except Exception:
+        pass
 
 
 MAX_WAIT_FOR_STREAM = 40  # seconds
@@ -186,6 +206,8 @@ class RTPClient:
         self.__outgoing_current_prebuffer_frames = OUTGOING_PREBUFFER_FRAMES
         self.__outgoing_stable_frames = 0
         self.__outgoing_underruns = 0
+        self.__e2e_first_rtp_sent_logged = False
+        self.__e2e_first_rtp_sent_pc = None
         self.__callbacks = callbacks
         self.__send_thread = None
         self.__recv_thread = None
@@ -436,6 +458,9 @@ class RTPClient:
                     self.__outgoing_buffer_stream_id = stream_id
                     self.__outgoing_stream_started = False
                     self.__outgoing_stream_ended = False
+                    # Reset e2e first-RTP tracking on new stream
+                    self.__e2e_first_rtp_sent_logged = False
+                    self.__e2e_first_rtp_sent_pc = None
                     self.__outgoing_current_prebuffer_frames = OUTGOING_PREBUFFER_FRAMES
                     self.__outgoing_stable_frames = 0
                     self.__outgoing_underruns = 0
@@ -478,6 +503,22 @@ class RTPClient:
                     payload, target_timestamp = self.__outgoing_buffer.pop(0)
                     self.__outgoing_stream_started = True
                     self.__outgoing_stable_frames += 1
+                    if not self.__e2e_first_rtp_sent_logged:
+                        self.__e2e_first_rtp_sent_pc = time.perf_counter()
+                        _e2e_log('FIRST_RTP_SENT', prebuffer_frames=self.__outgoing_current_prebuffer_frames,
+                                 buffer_depth=len(self.__outgoing_buffer))
+                        self.__e2e_first_rtp_sent_logged = True
+                        # Compute full e2e latency: VAD eager end -> first RTP on wire
+                        if (audio_stream
+                            and hasattr(audio_stream, '_e2e_vad_eager_end_pc')
+                            and audio_stream._e2e_vad_eager_end_pc is not None):
+                            e2e_ms = (self.__e2e_first_rtp_sent_pc - audio_stream._e2e_vad_eager_end_pc) * 1000
+                            utt_num = getattr(audio_stream, '_e2e_vad_utterance_num', 0)
+                            _e2e_log('E2E_LATENCY', utterance_num=utt_num,
+                                     e2e_ms=f'{e2e_ms:.0f}',
+                                     vad_eager_end_pc=audio_stream._e2e_vad_eager_end_pc,
+                                     rtp_sent_pc=self.__e2e_first_rtp_sent_pc,
+                                     prebuffer_frames=self.__outgoing_current_prebuffer_frames)
                     if (
                         OUTGOING_ADAPTIVE_BUFFER
                         and self.__outgoing_current_prebuffer_frames > OUTGOING_PREBUFFER_FRAMES
