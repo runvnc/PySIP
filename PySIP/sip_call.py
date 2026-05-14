@@ -224,13 +224,9 @@ class SipCall:
         self._is_call_stopped = True
 
     async def handle_incoming_call(self, initial_invite: SipMessage):
-        logger.log(logging.INFO, f"[PySIP-CALL] handle_incoming_call started for call_id={initial_invite.call_id}")
-        logger.log(logging.INFO, f"[PySIP-CALL] From: {initial_invite.get_header('From')}")
-        logger.log(logging.INFO, f"[PySIP-CALL] To: {initial_invite.get_header('To')}")
         # send 100 Trying
         trying_message = self.generate_trying_response(initial_invite)
         await self.sip_core.send(trying_message)
-        logger.log(logging.INFO, f"[PySIP-CALL] Sent 100 Trying")
 
         self.my_public_ip = await asyncio.to_thread(self.sip_core.get_public_ip)
         self.my_private_ip = await asyncio.to_thread(self.sip_core.get_local_ip)
@@ -251,23 +247,16 @@ class SipCall:
         # send 180 Ringing
         ringing_message = self.generate_ringing_response(initial_invite)
         await self.sip_core.send(ringing_message)
-        logger.log(logging.INFO, f"[PySIP-CALL] Sent 180 Ringing, waiting for accept/reject...")
 
         # notify the callbacks about the incoming call
-        logger.log(logging.INFO, f"[PySIP-CALL] Notifying {len(self._get_callbacks('incoming_call_cb'))} incoming_call_cb callbacks")
         for _cb in self._get_callbacks("incoming_call_cb"):
-            logger.log(logging.INFO, f"[PySIP-CALL] Firing incoming_call_cb callback")
             await _cb(self)
-            logger.log(logging.INFO, f"[PySIP-CALL] incoming_call_cb callback completed")
 
         try:
-            logger.log(logging.INFO, f"[PySIP-CALL] Waiting for accept/reject (timeout=15s)...")
             response = await asyncio.wait_for(self.call_response_future, 15.0)
-            logger.log(logging.INFO, f"[PySIP-CALL] Call response received: {response}")
             await self._handle_call_response(response, initial_invite)
 
         except asyncio.TimeoutError:
-            logger.log(logging.INFO, f"[PySIP-CALL] Call accept timeout - sending BUSY")
             await self._handle_call_response(CallResponse.BUSY, initial_invite)
 
     async def accept(self):

@@ -436,8 +436,6 @@ class SipClient:
 
     async def message_handler(self, msg: SipMessage):
         # This is the main message handler inside the class
-        logger.log(logging.INFO, f"[PySIP-CLIENT] message_handler called: method={msg.method}, status={msg.status}, call_id={msg.call_id}")
-        logger.log(logging.INFO, f"[PySIP-CLIENT] To header: {msg.get_header('To')}, username={self.username}")
         # its like other handlers outside the class that can
         # be accessed with @:meth:`Client.on_message` the only
         # difference is that its handled inside the :obj:`Client`
@@ -447,7 +445,6 @@ class SipClient:
         if (
             not msg.call_id == self.call_id and self.username not in to
         ):  # Filter only current call
-            logger.log(logging.INFO, f"[PySIP-CLIENT] FILTERED: call_id mismatch ({msg.call_id} != {self.call_id}) or username ({self.username}) not in To header ({to})")
             return  # These are just for extra check and not necessary
 
         logger.log(
@@ -521,7 +518,6 @@ class SipClient:
             await self.sip_core.send(options_ok)
 
         elif msg.data.startswith("INVITE") and self.username in to:
-            logger.log(logging.INFO, f"[PySIP-CLIENT] INVITE DETECTED for {self.username}! Creating incoming SipCall...")
             incoming_call = SipCall(
                 self.username, self.password, self.server, "", sip_core=self.sip_core
             )
@@ -529,7 +525,6 @@ class SipClient:
                 incoming_call._register_callback("incoming_call_cb", cb)
 
             await incoming_call.handle_incoming_call(msg)
-            logger.log(logging.INFO, f"[PySIP-CLIENT] handle_incoming_call completed for call_id={msg.call_id}")
 
     def _register_callback(self, cb_type, cb):
         self._callbacks.setdefault(cb_type, []).append(cb)

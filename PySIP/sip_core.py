@@ -274,7 +274,6 @@ class SipCore:
         return False
 
     async def send_to_callbacks(self, data):
-        logger.log(logging.INFO, f"[PySIP-CORE] send_to_callbacks: {len(self.on_message_callbacks)} callbacks registered")
         for callback in self.on_message_callbacks:
             data_formatted = SipMessage(data)
             # with ThreadPoolExecutor() as executor:
@@ -318,10 +317,7 @@ class SipCore:
                 try:
                     data = await asyncio.wait_for(self.udp_reader.read(4096), 0.5)
                     logger.log(logging.DEBUG, f"UDP received {len(data)} bytes")
-                    if len(data) > 0:
-                        logger.log(logging.INFO, f"[PySIP-CORE] UDP received {len(data)} bytes")
-                        data_preview = data[:200].decode('utf-8', errors='replace').replace('\r\n', ' | ')
-                        logger.log(logging.INFO, f"[PySIP-CORE] Data preview: {data_preview}")
+
                 except asyncio.TimeoutError:
                     await asyncio.sleep(0.01)
                     continue  # this is neccesary to avoid blocking of checking
@@ -334,10 +330,7 @@ class SipCore:
                     return
                 try:
                     data = await asyncio.wait_for(self.reader.read(4096), 0.5)
-                    if len(data) > 0:
-                        logger.log(logging.INFO, f"[PySIP-CORE] TCP received {len(data)} bytes")
-                        data_preview = data[:200].decode('utf-8', errors='replace').replace('\r\n', ' | ')
-                        logger.log(logging.INFO, f"[PySIP-CORE] Data preview: {data_preview}")
+
                 except asyncio.TimeoutError:
                     await asyncio.sleep(0.01)
                     continue  # very important!!
