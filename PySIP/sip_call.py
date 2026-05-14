@@ -97,6 +97,7 @@ class SipCall:
         self._auth_in_progress = False  # Prevent multiple auth attempts
         self._last_auth_cseq = None  # Track which INVITE we authenticated
         self._preauth_enabled = False  # Set to True to pre-authenticate initial INVITE
+        self._is_incoming = False  # Set to True for incoming calls
 
     async def start(self):
         self._refer_future = asyncio.Future()
@@ -224,6 +225,7 @@ class SipCall:
         self._is_call_stopped = True
 
     async def handle_incoming_call(self, initial_invite: SipMessage):
+        self._is_incoming = True
         # send 100 Trying
         trying_message = self.generate_trying_response(initial_invite)
         await self.sip_core.send(trying_message)
@@ -290,6 +292,9 @@ class SipCall:
         if response == CallResponse.ACCEPT:
             ok_response = self.ok_generator(msg, include_sdp=True)
             await self.sip_core.send(ok_response)
+            # Set dialog state to CONFIRMED for incoming calls
+            self.dialogue.state = DialogState.CONFIRMED
+            self.dialogue.events[DialogState.CONFIRMED].set()
             # regiser the callback for when the call is ANSWERED
             self._register_callback("state_changed_cb", self.on_call_answered)
             self._register_callback("dtmf_callback", self._dtmf_handler.dtmf_callback)
@@ -827,6 +832,7 @@ class SipCall:
             msg.status == SIPStatus(200)
             and msg.method == "INVITE"
             and self.username not in msg.get_header("To")
+            and not self._is_incoming
         ):
             # Handling successfull invite response
             self.dialogue.remote_tag = msg.to_tag or ""  # setting it if not set
