@@ -360,9 +360,16 @@ class SipCore:
                 if line.lower().startswith("content-length:")
             ]
 
-            total_length = (
-                end_of_headers + 4 + content_length[0]
-            )  # 4 for the "\r\n\r\n"
+            if not content_length:
+                logger.log(
+                    logging.WARNING,
+                    f"No Content-Length header found in SIP message. "
+                    f"Headers:\n{headers}\n"  
+                    f"Raw data ({len(data)} bytes): {data[:500]}"
+                )
+                total_length = len(data)  # consume the rest of the buffer
+            else:
+                total_length = end_of_headers + 4 + content_length[0]  # 4 for "\r\n\r\n"
             if total_length > len(data):
                 break
 
