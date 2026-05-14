@@ -697,6 +697,19 @@ class SipMessage:
         except IndexError:
             self.body_data = ""
 
+        # RFC 3261 Section 7.3.1 compact header form mapping
+        COMPACT_HEADERS = {
+            'e': 'Content-Encoding',
+            'f': 'From',
+            'i': 'Call-ID',
+            'k': 'Supported',
+            'l': 'Content-Length',
+            'm': 'Contact',
+            's': 'Subject',
+            't': 'To',
+            'v': 'Via',
+        }
+
         headers_lines = self.headers_data.split("\r\n")
         for index, line in enumerate(headers_lines):
             if index == 0:  # First line
@@ -704,7 +717,8 @@ class SipMessage:
 
             else:
                 key, value = line.split(":", 1)  # Split at first colon
-                self.headers[key.strip()] = value.strip()
+                normalized_key = COMPACT_HEADERS.get(key.strip().lower(), key.strip())
+                self.headers[normalized_key] = value.strip()
 
         if self.body_data != "":
             body_lines = self.body_data.split("\r\n")
