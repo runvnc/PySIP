@@ -357,7 +357,7 @@ class SipCore:
             content_length = [
                 int(line.split(":")[1].strip())
                 for line in headers.split("\r\n")
-                if line.lower().startswith("content-length:")
+                if line.lower().startswith("content-length:") or line.lower().startswith("l:")
             ]
 
             if not content_length:
