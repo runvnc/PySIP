@@ -29,6 +29,9 @@ class SipClient:
         sip_core=None,
     ):
         self.username = username
+        # Track ongoing incoming calls by Call-ID to handle retransmissions
+        # RFC 3261 Section 17.2.3: retransmitted INVITEs must match existing transaction
+        self._incoming_calls = {}
         try:
             self.server_host = server.split(":")[0]
             self.port = server.split(":")[1]
@@ -519,13 +522,30 @@ class SipClient:
             await self.sip_core.send(options_ok)
 
         elif msg.data.startswith("INVITE"):
+            # RFC 3261 Section 17.2.3: Match retransmitted INVITEs to existing calls
+            # RFC 3261 Section 17.2.1: In Proceeding state, replay last provisional response
+            existing_call = self._incoming_calls.get(msg.call_id)
+            if existing_call:
+                logger.log(
+                    logging.INFO,
+                    f"[INCOMING] INVITE retransmission detected for Call-ID {msg.call_id}, ignoring (RFC 3261 Section 17.2.1)"
+                )
+                return
+            
+            # New incoming call - create SipCall and track it
             incoming_call = SipCall(
                 self.username, self.password, self.server, "", sip_core=self.sip_core
             )
             for cb in self._get_callbacks("incoming_call_cb"):
                 incoming_call._register_callback("incoming_call_cb", cb)
 
-            await incoming_call.handle_incoming_call(msg)
+            self._incoming_calls[msg.call_id] = incoming_call
+            try:
+                await incoming_call.handle_incoming_call(msg)
+            finally:
+                # Clean up tracking when call handling completes
+                if msg.call_id in self._incoming_calls:
+                    del self._incoming_calls[msg.call_id]
 
     def _register_callback(self, cb_type, cb):
         self._callbacks.setdefault(cb_type, []).append(cb)
