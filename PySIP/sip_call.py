@@ -14,6 +14,7 @@ from .exceptions import SIPTransferException
 from .rtp_handler import RTP_PORT_RANGE, RTPClient, TransmitType
 from .sip_core import Counter, DialogState, SipCore, SipDialogue, SipMessage
 from .filters import SIPCompatibleMethods, SIPStatus, CallState
+from .filters import SIPMessageType
 from .utils.logger import logger, get_call_logger
 from .codecs import CODECS
 
@@ -758,6 +759,11 @@ class SipCall:
 
         # If the call id is not same as the current then return
         if msg.call_id != self.call_id:
+            return
+
+        # For incoming calls, skip processing of our own sent responses
+        # (fed back via send_to_callbacks). Only process received requests.
+        if self._is_incoming and msg.type == SIPMessageType.RESPONSE:
             return
 
         if msg.status == SIPStatus(407) and msg.method == "INVITE":

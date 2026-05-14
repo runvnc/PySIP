@@ -542,10 +542,8 @@ class SipClient:
             self._incoming_calls[msg.call_id] = incoming_call
             try:
                 await incoming_call.handle_incoming_call(msg)
-            finally:
-                # Clean up tracking when call handling completes
-                if msg.call_id in self._incoming_calls:
-                    del self._incoming_calls[msg.call_id]
+            except Exception as e:
+                logger.log(logging.ERROR, f"Error handling incoming call: {e}", exc_info=True)
 
     def _register_callback(self, cb_type, cb):
         self._callbacks.setdefault(cb_type, []).append(cb)

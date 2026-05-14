@@ -718,7 +718,14 @@ class SipMessage:
             else:
                 key, value = line.split(":", 1)  # Split at first colon
                 normalized_key = COMPACT_HEADERS.get(key.strip().lower(), key.strip())
-                self.headers[normalized_key] = value.strip()
+                # RFC 3261: Via and other headers can appear multiple times.
+                # Preserve all values so responses include the full proxy chain.
+                if normalized_key in self.headers:
+                    # Append with CRLF+key so get_header() returns all values
+                    # ready to be split into separate header lines in responses.
+                    self.headers[normalized_key] = self.headers[normalized_key] + "\r\n" + normalized_key + ": " + value.strip()
+                else:
+                    self.headers[normalized_key] = value.strip()
 
         if self.body_data != "":
             body_lines = self.body_data.split("\r\n")
