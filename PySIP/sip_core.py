@@ -940,7 +940,7 @@ class SDPParser:
         for attr in sdp["a"]:
             if "rtcp" in attr:
                 self.rtcp_port = int(attr.split(":")[1].split(" ")[0])
-            elif "ptime" in attr:
+            elif attr.startswith("ptime:"):
                 self.ptime = int(attr.split(":")[1])
             elif "rtpmap" in attr:
                 try:
