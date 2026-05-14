@@ -444,7 +444,8 @@ class SipClient:
         to = msg.get_header("To")
         if (
             not msg.call_id == self.call_id and self.username not in to
-        ):  # Filter only current call
+            and not msg.data.startswith("INVITE")
+        ):  # Filter only current call, but always pass INVITEs through for incoming calls
             return  # These are just for extra check and not necessary
 
         logger.log(
@@ -517,7 +518,7 @@ class SipClient:
             options_ok = self.ok_generator(msg)
             await self.sip_core.send(options_ok)
 
-        elif msg.data.startswith("INVITE") and self.username in to:
+        elif msg.data.startswith("INVITE"):
             incoming_call = SipCall(
                 self.username, self.password, self.server, "", sip_core=self.sip_core
             )
