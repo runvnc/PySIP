@@ -763,7 +763,7 @@ class SipCall:
 
         # For incoming calls, skip processing of our own sent responses
         # (fed back via send_to_callbacks). Only process received requests.
-        if self._is_incoming and msg.type == SIPMessageType.RESPONSE:
+        if self._is_incoming and msg.type == SIPMessageType.RESPONSE and msg.method == "INVITE":
             return
 
         if msg.status == SIPStatus(407) and msg.method == "INVITE":
