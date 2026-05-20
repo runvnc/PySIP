@@ -667,23 +667,20 @@ class SipCall:
                 CODECS,
             )
 
-        peer_ip, peer_port = self.sip_core.get_extra_info("peername")
         _, port = self.sip_core.get_extra_info("sockname")
 
-        if data_parsed.is_from_client(self.username):  # outgoing call
-            from_header = f"From: <sip:{self.caller_id}@{self.server}>;tag={self.dialogue.local_tag}\r\n"
-            to_header = f"To: <sip:{self.callee}@{self.server}>;tag={self.dialogue.remote_tag}\r\n"
+        from_field = data_parsed.get_header("From")
+        to_field = data_parsed.get_header("To")
 
-        elif include_sdp:  # incoming call
-            from_field, to_field = data_parsed.get_header(
-                "From"
-            ), data_parsed.get_header("To")
-            from_header = f"From: {from_field}\r\n"
+        # SIP responses must mirror the request's From/To headers.  Rebuilding
+        # them from local call fields can reverse caller/callee on incoming BYE
+        # responses, causing providers to ignore the 200 OK and keep the call
+        # alive until their transaction/session timeout.
+        from_header = f"From: {from_field}\r\n"
+        if include_sdp and ";tag=" not in (to_field or ""):
             to_header = f"To: {to_field};tag={self.dialogue.local_tag}\r\n"
-
         else:
-            from_header = f"From: <sip:{self.callee}@{self.server}>;tag={self.dialogue.remote_tag}\r\n"
-            to_header = f"To: <sip:{self.caller_id}@{self.server}>;tag={self.dialogue.local_tag}\r\n"
+            to_header = f"To: {to_field}\r\n"
 
         msg = "SIP/2.0 200 OK\r\n"
         msg += "Via: " + data_parsed.get_header("Via") + "\r\n"
@@ -691,7 +688,7 @@ class SipCall:
         msg += to_header
         msg += f"Call-ID: {data_parsed.call_id}\r\n"
         msg += f"CSeq: {data_parsed.cseq} {data_parsed.method}\r\n"
-        msg += f"Contact: <sip:{self.username}@{self.my_public_ip};transport={self.CTS.upper()}>\r\n"
+        msg += f"Contact: <sip:{self.username}@{self.my_public_ip}:{port};transport={self.CTS.upper()}>\r\n"
         msg += f"Allow: {', '.join(SIPCompatibleMethods)}\r\n"
         msg += "Supported: replaces, timer\r\n"
         msg += "Content-Type: application/sdp\r\n" if include_sdp else ""
@@ -864,14 +861,18 @@ class SipCall:
             pass
 
         elif msg.method == "BYE" and not msg.is_from_client(self.username):
-            # Hanlding callee call hangup
-            await self.update_call_state(CallState.ENDED)
+            # Handling remote hangup.  For an actual BYE request, send the
+            # transaction 200 OK before firing application state callbacks or
+            # doing local cleanup, so the provider sees call teardown promptly.
             if not str(msg.data).startswith("BYE"):
-                # Seperating BYE messges from 200 OK to bye messages or etc.
+                # Separating BYE requests from 200 OK responses to BYE.
+                await self.update_call_state(CallState.ENDED)
                 self.dialogue.update_state(msg)
                 return
             ok_message = self.ok_generator(msg)
             await self.sip_core.send(ok_message)
+            self.dialogue.update_state(msg)
+            await self.update_call_state(CallState.ENDED)
             await self.stop("Callee hanged up")
 
         elif msg.method == "BYE" and msg.is_from_client(self.username):

@@ -290,16 +290,20 @@ class SipCore:
                 logger.log(logging.CRITICAL, "There is no UdpWriter, cant write!")
                 return
             logger.log(logging.DEBUG, f"Sending UDP message:\n{msg}")
-            await self.send_to_callbacks(msg)
             self.udp_writer.write(msg.encode())
+            # Feed sent messages to local state/debug callbacks only after the
+            # packet is queued to the socket.  In particular, a 200 OK to an
+            # incoming BYE must not be delayed behind application cleanup.
+            await self.send_to_callbacks(msg)
             
         else:
             if not self.writer:
                 logger.log(logging.CRITICAL, "There is no StreamWriter, can't write!")
                 return
-            await self.send_to_callbacks(msg)
             self.writer.write(msg.encode())
             await self.writer.drain()
+            # See UDP note above: socket write first, local callback echo second.
+            await self.send_to_callbacks(msg)
 
     async def receive(self):
         while True:
@@ -495,7 +499,9 @@ class SipDialogue:
             if message.body is not None:
                 self._remote_session_info = SDPParser(message.body)
                 self.update_remote_contact(message.get_header("Contact"))
-        elif message.method == "BYE" and message.status is SIPStatus.OK:
+        elif message.method == "BYE" and (
+            message.type == SIPMessageType.MESSAGE or message.status is SIPStatus.OK
+        ):
             self.state = DialogState.TERMINATED
         elif message.status == SIPStatus(487) and message.method == "INVITE":
             self.state = DialogState.TERMINATED
