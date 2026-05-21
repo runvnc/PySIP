@@ -280,9 +280,13 @@ class SipCore:
             #     loop = asyncio.get_event_loop()
             #     await loop.run_in_executor(executor, data_formatted.parse)
 
-            data_formatted.parse()
-
-            await callback(data_formatted)
+            try:
+                data_formatted.parse()
+                await callback(data_formatted)
+            except Exception:
+                # A stale per-call callback must never kill the shared account
+                # receive/register loop.  Log and keep dispatching to the rest.
+                logger.log(logging.ERROR, "SIP message callback failed", exc_info=True)
 
     async def send(self, msg):
         if self.connection_type == ConnectionType.UDP:

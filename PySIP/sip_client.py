@@ -540,9 +540,19 @@ class SipClient:
                 incoming_call._register_callback("incoming_call_cb", cb)
 
             self._incoming_calls[msg.call_id] = incoming_call
+
+            @incoming_call.on_call_hanged_up
+            async def _cleanup_incoming_call(reason, call_id=msg.call_id):
+                self._incoming_calls.pop(call_id, None)
+                logger.log(
+                    logging.DEBUG,
+                    f"[INCOMING] Removed completed incoming call {call_id}: {reason}"
+                )
+
             try:
                 await incoming_call.handle_incoming_call(msg)
             except Exception as e:
+                self._incoming_calls.pop(msg.call_id, None)
                 logger.log(logging.ERROR, f"Error handling incoming call: {e}", exc_info=True)
 
     def _register_callback(self, cb_type, cb):

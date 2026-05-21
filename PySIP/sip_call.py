@@ -100,6 +100,26 @@ class SipCall:
         self._preauth_enabled = False  # Set to True to pre-authenticate initial INVITE
         self._is_incoming = False  # Set to True for incoming calls
 
+    def _detach_sip_core_callbacks(self):
+        """Remove this call's per-call SIP callbacks from the shared SipCore.
+
+        Incoming calls share the account SipCore.  Each SipCall registers its
+        message/error handlers on that shared core, so completed calls must
+        detach or later REGISTER/INVITE traffic gets fanned out to stale call
+        handlers forever.
+        """
+        callbacks = getattr(self.sip_core, 'on_message_callbacks', None)
+        if callbacks is None:
+            return
+        for cb in (self.message_handler, self.error_handler):
+            try:
+                while cb in callbacks:
+                    callbacks.remove(cb)
+            except ValueError:
+                pass
+            except Exception as e:
+                logger.log(logging.DEBUG, f"Error detaching SIP callback: {e}")
+
     async def start(self):
         self._refer_future = asyncio.Future()
         self._is_call_ongoing = asyncio.Event()
@@ -224,6 +244,7 @@ class SipCall:
         # also check for any rtp session and stop it
         await self._cleanup_rtp()
         self._is_call_stopped = True
+        self._detach_sip_core_callbacks()
 
     async def handle_incoming_call(self, initial_invite: SipMessage):
         self._is_incoming = True
