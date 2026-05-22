@@ -188,6 +188,7 @@ class SipCore:
 
     async def connect(self):
         self.is_running = asyncio.Event()
+        self.is_receiving = asyncio.Event()
         self._is_connecting = asyncio.Event()
         try:
             self._is_connecting.set()

@@ -157,10 +157,30 @@ class SipClient:
         self.registered = asyncio.Future()
 
     async def periodic_register(self, delay: float):
+        retry_delay = 10.0
         while True:
-            await self.register()
+            success = await self.register()
+            if not success:
+                logger.log(
+                    logging.WARNING,
+                    "Periodic REGISTER failed for %s; reconnecting SIP transport and retrying in %.1fs",
+                    self.username,
+                    retry_delay,
+                )
+                try:
+                    await self._restart_receive_transport()
+                except Exception:
+                    logger.log(logging.ERROR, "Failed to restart SIP transport after REGISTER failure", exc_info=True)
+                    await asyncio.sleep(retry_delay)
+                    continue
+                if not self.sip_core.is_running.is_set():
+                    await asyncio.sleep(retry_delay)
+                    continue
+                await asyncio.sleep(retry_delay)
+                continue
 
-            sleep_task = asyncio.create_task(asyncio.sleep(delay - 5))
+            retry_delay = 10.0
+            sleep_task = asyncio.create_task(asyncio.sleep(max(1.0, delay - 5)))
             event_cleared_task = asyncio.create_task(
                 self.wait_for_event_clear(self.sip_core.is_running)
             )
@@ -180,6 +200,35 @@ class SipClient:
             logging.DEBUG,
             "The app will no longer register. Registeration task stopped.",
         )
+
+    async def _restart_receive_transport(self):
+        """Reconnect the SIP transport and ensure the receive loop is running.
+
+        A failed REGISTER refresh means the account may become unreachable at
+        the provider.  For UDP this can happen after NAT/provider state changes
+        or if the receive loop has died.  Recreate the transport and receive
+        task before retrying registration.
+        """
+        receive_task = self.sip_core.receive_task
+        if receive_task and not receive_task.done():
+            receive_task.cancel()
+            try:
+                await receive_task
+            except asyncio.CancelledError:
+                pass
+        self.sip_core.receive_task = None
+
+        self.sip_core.is_running.clear()
+        await self.sip_core.close_connections()
+        await self.sip_core.connect()
+
+        receive_task = asyncio.create_task(
+            self.sip_core.receive(), name="Receive Messages Task"
+        )
+        self.sip_core.receive_task = receive_task
+        self.all_tasks.append(receive_task)
+        await self.sip_core.is_receiving.wait()
+
 
     async def wait_for_event_clear(self, event: asyncio.Event):
         while True:
