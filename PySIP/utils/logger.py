@@ -8,7 +8,7 @@ def get_call_logger(call_id):
     return call_logger
 
 # Check MR_DEBUG env variable
-MR_DEBUG = os.environ.get('MR_DEBUG', '').lower() in ('1', 'true', 'yes')
+MR_DEBUG = os.environ.get('MR_DEBUG', '').lower() in ('2', 'true', 'yes')
 
 # Set log level based on MR_DEBUG
 if not MR_DEBUG:
