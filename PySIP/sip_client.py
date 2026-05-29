@@ -75,9 +75,16 @@ class SipClient:
         self._last_401_time = 0
 
     async def run(self):
+        """Run the SIP account receive loop and periodic REGISTER refreshes.
+
+        The receive task is intentionally managed through ``self.sip_core.receive_task``
+        because ``periodic_register()`` may restart the SIP transport after a
+        REGISTER refresh failure.  Do not await the receive task in the same
+        gather as the registration task: the restart path cancels/replaces that
+        receive task, and awaiting it there causes the whole account client to
+        exit and stop re-registering.
+        """
         register_task = None
-        receive_task = None
-        tasks = []
         try:
             self.my_public_ip = await asyncio.to_thread(self.sip_core.get_public_ip)
             self.my_private_ip = await asyncio.to_thread(self.sip_core.get_local_ip)
@@ -92,37 +99,33 @@ class SipClient:
             elif self.sip_core._is_connecting.is_set():
                 await self.sip_core.is_running.wait()
 
-            register_task = asyncio.create_task(
-                self.periodic_register(self.register_duration), name="Periodic Register"
-            )
-            tasks.append(register_task)
-            if not self.sip_core.receive_task:
-                receive_task = asyncio.create_task(
+            if not self.sip_core.receive_task or self.sip_core.receive_task.done():
+                self.sip_core.receive_task = asyncio.create_task(
                     self.sip_core.receive(), name="Receive Messages Task"
                 )
-                self.sip_core.receive_task = receive_task
-                tasks.append(self.sip_core.receive_task)
+                self.all_tasks.append(self.sip_core.receive_task)
 
             # Wait for receive task to actually start receiving before starting registration
             logger.log(logging.DEBUG, "Waiting for receive task to be ready...")
             await self.sip_core.is_receiving.wait()
             logger.log(logging.DEBUG, "Receive task is ready, starting registration")
 
-            try:
-                self.all_tasks.extend(tasks)
-                await asyncio.gather(*tasks)
-            except asyncio.CancelledError:
-                if receive_task.done():
-                    pass
-                if asyncio.current_task() and asyncio.current_task().cancelling() > 0:
-                    raise
+            register_task = asyncio.create_task(
+                self.periodic_register(self.register_duration), name="Periodic Register"
+            )
+            self.all_tasks.append(register_task)
 
+            # Only the registration loop owns account lifetime.  The receive
+            # task may be cancelled/replaced by _restart_receive_transport().
+            await register_task
+
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.log(logging.ERROR, e, exc_info=True)
             return
 
         finally:
-
             if register_task and not register_task.done():
                 register_task.cancel()
                 try:
@@ -130,6 +133,7 @@ class SipClient:
                 except asyncio.CancelledError:
                     pass  # Task cancellation is expected
 
+            receive_task = self.sip_core.receive_task
             if receive_task and not receive_task.done():
                 receive_task.cancel()
                 try:

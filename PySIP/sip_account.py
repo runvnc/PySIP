@@ -112,6 +112,43 @@ class SipAccount:
         if self.__sip_client:
             await self.__sip_client.stop()
 
+    def health_info(self) -> dict:
+        """Return best-effort health details for the registered account listener."""
+        client = self.__sip_client
+        core = self.sip_core
+        client_task = self.__client_task
+        receive_task = getattr(core, "receive_task", None) if core else None
+        udp_writer = getattr(core, "udp_writer", None) if core else None
+        udp_transport = None
+        udp_transport_closing = None
+        if udp_writer is not None:
+            try:
+                udp_transport = udp_writer.protocol.transport
+                udp_transport_closing = udp_transport.is_closing() if udp_transport else True
+            except Exception:
+                udp_transport_closing = True
+
+        info = {
+            "has_client": client is not None,
+            "client_task_done": client_task.done() if client_task else None,
+            "is_running": core.is_running.is_set() if core else False,
+            "is_receiving": core.is_receiving.is_set() if core else False,
+            "receive_task_exists": receive_task is not None,
+            "receive_task_done": receive_task.done() if receive_task else None,
+            "udp_transport_exists": udp_transport is not None,
+            "udp_transport_closing": udp_transport_closing,
+        }
+        info["healthy"] = bool(
+            info["has_client"]
+            and client_task is not None
+            and not info["client_task_done"]
+            and info["is_running"]
+            and info["receive_task_exists"]
+            and not info["receive_task_done"]
+            and (udp_transport_closing is not True)
+        )
+        return info
+
     def make_call(self, to: str) -> SipCall:
         if not self.__sip_client:
             self.sip_core = None
