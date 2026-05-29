@@ -15,7 +15,7 @@ if not MR_DEBUG:
     # Completely suppress all logging for production performance
     logging.disable(logging.CRITICAL)
 
-LOG_LEVEL = logging.DEBUG if MR_DEBUG else logging.CRITICAL
+LOG_LEVEL = logging.DEBUG if MR_DEBUG else logging.INFO
 
 def setup_logger():
     logger = logging.getLogger(__name__)
