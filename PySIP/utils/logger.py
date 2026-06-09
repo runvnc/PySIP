@@ -11,10 +11,8 @@ def get_call_logger(call_id):
 MR_DEBUG = os.environ.get('MR_DEBUG', '').lower() in ('2', 'true', 'yes')
 
 # Set log level based on MR_DEBUG
-if not MR_DEBUG:
-    # Completely suppress all logging for production performance
-    logging.disable(logging.CRITICAL)
-
+# Do not call logging.disable() here: it globally disables logging for the
+# entire embedding process, including mr_sip/MindRoot diagnostics.
 LOG_LEVEL = logging.DEBUG if MR_DEBUG else logging.INFO
 
 def setup_logger():

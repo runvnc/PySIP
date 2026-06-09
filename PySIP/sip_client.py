@@ -225,6 +225,7 @@ class SipClient:
         self.sip_core.is_running.clear()
         await self.sip_core.close_connections()
         await self.sip_core.connect()
+        self.retry_handler.pending_operations.clear()
 
         receive_task = asyncio.create_task(
             self.sip_core.receive(), name="Receive Messages Task"
@@ -455,13 +456,18 @@ class SipClient:
     async def register(self):
         """Register with retry logic"""
         msg = self.build_register_message()
-        operation_id = f"REGISTER_{self.call_id}_{self.register_counter.current()}"
+        cseq = self.register_tags.get("cseq") or self.register_counter.current()
+        operation_id = f"REGISTER_{self.call_id}_{cseq}"
 
         try:
+            if self.registered and not self.registered.done():
+                initial_registration = True
+            else:
+                initial_registration = False
             success = await self.retry_handler.execute_with_retry(
                 lambda: self.sip_core.send(msg), operation_id, timeout=4.0
             )
-            if success:
+            if success and initial_registration:
                 if self.registered and not self.registered.done():
                     self.registered.set_result(True)
 
@@ -480,7 +486,7 @@ class SipClient:
 
         except SIPError as e:
             logger.error(f"Registration failed for {self.username}: {str(e)}")
-            if self.registered and not self.registered.done():
+            if 'initial_registration' in locals() and initial_registration and self.registered and not self.registered.done():
                 self.registered.set_result(False)
 
             return False
