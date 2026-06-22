@@ -624,8 +624,18 @@ class SipCall:
         )
         msg += 'Reason: Q.850;cause=16;text="normal call clearing"\r\n'
         msg += "Max-Forwards: 70\r\n"
-        msg += f"From: sip:{self.caller_id}@{self.server};tag={self.dialogue.local_tag}\r\n"
-        msg += f"To: sip:{self.callee}@{self.server};tag={self.dialogue.remote_tag}\r\n"
+        # In-dialog From/To must reflect our role. For an outgoing (UAC) call we
+        # are the caller; for an incoming (UAS) call we are the callee, so the
+        # local/remote URIs are reversed. Tags always pair local_tag(From)/
+        # remote_tag(To) for a request we originate.
+        if self._is_incoming:
+            local_user = self.username
+            remote_user = self.caller_id
+        else:
+            local_user = self.caller_id
+            remote_user = self.callee
+        msg += f"From: sip:{local_user}@{self.server};tag={self.dialogue.local_tag}\r\n"
+        msg += f"To: sip:{remote_user}@{self.server};tag={self.dialogue.remote_tag}\r\n"
         msg += f"Call-ID: {self.call_id}\r\n"
         msg += f"CSeq: {transaction.cseq} BYE\r\n"
         msg += f"Route: <{request_uri};lr>\r\n"
@@ -796,7 +806,8 @@ class SipCall:
                 logger.log(logging.DEBUG, f"Ignoring 407 for old transaction (CSeq {msg.cseq} <= {self._last_auth_cseq})")
                 return
             
-            self.dialogue.remote_tag = msg.to_tag
+            if not self._is_incoming:
+                self.dialogue.remote_tag = msg.to_tag
             transaction = self.dialogue.find_transaction(msg.branch)
             if not transaction:
                 logger.log(logging.WARNING, "Received 407 for unknown transaction")
@@ -830,7 +841,8 @@ class SipCall:
                 logger.log(logging.DEBUG, f"Ignoring 401 for old transaction (CSeq {msg.cseq} <= {self._last_auth_cseq})")
                 return
             
-            self.dialogue.remote_tag = msg.to_tag
+            if not self._is_incoming:
+                self.dialogue.remote_tag = msg.to_tag
             transaction = self.dialogue.find_transaction(msg.branch)
             if not transaction:
                 return
@@ -877,7 +889,8 @@ class SipCall:
                 CallState.RINGING if msg.status is SIPStatus(180) else CallState.DIALING
             )
             await self.update_call_state(st)
-            self.dialogue.remote_tag = msg.to_tag or ""  # setting it if not already
+            if not self._is_incoming:
+                self.dialogue.remote_tag = msg.to_tag or ""  # UAC only; UAS keeps caller's From-tag
             self.dialogue.auth_retry_count = 0  # reset the auth counter
             pass
 
@@ -952,8 +965,13 @@ class SipCall:
         if not msg.status:
             return
 
-        # reset the remote tag
-        self.dialogue.remote_tag = msg.to_tag or ""
+        # reset the remote tag (UAC/outgoing only). For an incoming/UAS dialog the
+        # remote tag is the caller's From-tag, fixed at dialog creation. In-dialog
+        # messages (and error responses such as 403 to our BYE) carry OUR local
+        # tag in the To header, so assigning it here corrupts remote_tag and makes
+        # our BYE un-matchable at the carrier (Telnyx 403 Forbidden).
+        if not self._is_incoming:
+            self.dialogue.remote_tag = msg.to_tag or ""
 
         if not 400 <= msg.status.code <= 699:
             return
