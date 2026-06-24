@@ -7,13 +7,30 @@ def get_call_logger(call_id):
     call_logger = logging.LoggerAdapter(logger, {'call_id': call_id})
     return call_logger
 
-# Check MR_DEBUG env variable
-MR_DEBUG = os.environ.get('MR_DEBUG', '').lower() in ('2', 'true', 'yes')
+# Check MR_DEBUG env variable. Modes (shared with MindRoot server.py):
+#   none            -> hard-disable ALL logging process-wide (production audio).
+#   errors|error    -> ERROR+ only, GLOBALLY (logging.disable(WARNING)).
+#                      This overrides any per-logger DEBUG/INFO levels set by
+#                      libraries, which is the only reliable way to actually kill
+#                      DEBUG spam. Real errors + stack traces still come through.
+#   1|2|true|yes|debug -> full DEBUG logging.
+#   (else / unset)  -> INFO.
+_MR_DEBUG_RAW = os.environ.get('MR_DEBUG', '').lower()
+MR_DEBUG = _MR_DEBUG_RAW in ('1', '2', 'true', 'yes', 'debug')
 
-# Set log level based on MR_DEBUG
-# Do not call logging.disable() here: it globally disables logging for the
-# entire embedding process, including mr_sip/MindRoot diagnostics.
-LOG_LEVEL = logging.DEBUG if MR_DEBUG else logging.INFO
+if MR_DEBUG:
+    LOG_LEVEL = logging.DEBUG
+elif _MR_DEBUG_RAW in ('errors', 'error', 'err'):
+    LOG_LEVEL = logging.ERROR
+else:
+    LOG_LEVEL = logging.INFO
+
+# Global floors. logging.disable(L) drops every record with severity <= L on
+# ALL loggers regardless of their own level/handlers.
+if _MR_DEBUG_RAW == 'none':
+    logging.disable(logging.CRITICAL)        # everything off
+elif _MR_DEBUG_RAW in ('errors', 'error', 'err'):
+    logging.disable(logging.WARNING)         # only ERROR and CRITICAL survive
 
 def setup_logger():
     logger = logging.getLogger(__name__)
