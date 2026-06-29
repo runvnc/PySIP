@@ -14,6 +14,7 @@ import time
 import requests
 
 from .utils.logger import logger
+from datetime import datetime
 from .filters import (
     SipFilter,
     SIPMessageType,
@@ -55,6 +56,23 @@ connection_ports = {
 
 SAVE_TLS_KEYLOG = False
 CHECKSUM_SALT = "oYRFBHVG31444fs45AWcvir_7%8mdtTUiujnduI134RGubctsb87654"
+
+# Dedicated hangup diagnostics log (shared with sip_call.py). Log-only; no behavior change.
+HANGUP_LOG = '/tmp/sip_hangup.log'
+
+
+def _hangup_log(event: str, call_id: str = '', **kwargs):
+    now = datetime.now()
+    ts = now.strftime('%Y-%m-%d %H:%M:%S') + f'.{now.microsecond // 1000:03d}'
+    extra = ' '.join(f'{k}={v}' for k, v in kwargs.items())
+    line = f'[{ts}] [HANGUP] {event} perf_counter={time.perf_counter():.6f} call_id={call_id} {extra}'
+    try:
+        with open(HANGUP_LOG, 'a') as f:
+            f.write(line + '\n')
+            f.flush()
+    except Exception:
+        pass
+    logger.info(f'[HANGUP] {event} call_id={call_id} {extra}')
 
 
 class SipCore:
@@ -349,6 +367,12 @@ class SipCore:
             for sip_message_data in sip_messages:
                 logger.log(logging.DEBUG, f"Processing SIP message, {len(self.on_message_callbacks)} callbacks registered")
                 logger.log(logging.DEBUG, f"SIP Message Data:\n{sip_message_data.decode()}")
+                try:
+                    _preview = sip_message_data.decode(errors='replace')
+                    if _preview.startswith('BYE') or '\r\nBYE ' in _preview:
+                        _hangup_log('CORE_WIRE_BYE_RECEIVED', '', first_line=_preview.split('\r\n', 1)[0], num_callbacks=len(self.on_message_callbacks))
+                except Exception:
+                    pass
                 await self.send_to_callbacks(sip_message_data.decode())
             await asyncio.sleep(0.1)
 
@@ -504,9 +528,12 @@ class SipDialogue:
             if message.body is not None:
                 self._remote_session_info = SDPParser(message.body)
                 self.update_remote_contact(message.get_header("Contact"))
-        elif message.method == "BYE" and (
-            message.type == SIPMessageType.MESSAGE or message.status is SIPStatus.OK
-        ):
+        elif message.method == "BYE":
+            # Any BYE terminates the dialog: an inbound BYE *request* (type
+            # REQUEST, no status) from the remote party, OR the 200 OK to a BYE
+            # we sent. The previous condition only matched MESSAGE/200-OK, so a
+            # remote-initiated BYE request left the dialog stuck in CONFIRMED and
+            # caused stop() to send a spurious second BYE and time out.
             self.state = DialogState.TERMINATED
         elif message.status == SIPStatus(487) and message.method == "INVITE":
             self.state = DialogState.TERMINATED

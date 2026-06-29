@@ -4,6 +4,8 @@ from enum import Enum
 from functools import wraps
 import logging
 import random
+import time
+from datetime import datetime
 from typing import Callable, Dict, List, Literal, Optional
 import wave
 
@@ -19,6 +21,24 @@ from .utils.logger import logger, get_call_logger
 from .codecs import CODECS
 
 __all__ = ["SipCall", "DTMFHandler"]
+
+
+# Dedicated hangup diagnostics log (shared with sip_core.py). Log-only; no behavior change.
+HANGUP_LOG = '/tmp/sip_hangup.log'
+
+
+def _hangup_log(event: str, call_id: str = '', **kwargs):
+    now = datetime.now()
+    ts = now.strftime('%Y-%m-%d %H:%M:%S') + f'.{now.microsecond // 1000:03d}'
+    extra = ' '.join(f'{k}={v}' for k, v in kwargs.items())
+    line = f'[{ts}] [HANGUP] {event} perf_counter={time.perf_counter():.6f} call_id={call_id} {extra}'
+    try:
+        with open(HANGUP_LOG, 'a') as f:
+            f.write(line + '\n')
+            f.flush()
+    except Exception:
+        pass
+    logger.info(f'[HANGUP] {event} call_id={call_id} {extra}')
 
 
 class CallResponse(Enum):
@@ -787,6 +807,8 @@ class SipCall:
 
         # If the call id is not same as the current then return
         if msg.call_id != self.call_id:
+            if getattr(msg, 'method', None) == 'BYE':
+                _hangup_log('CALL_BYE_CALLID_MISMATCH', self.call_id, msg_call_id=msg.call_id)
             return
 
         # For incoming calls, skip processing of our own sent responses
@@ -898,6 +920,7 @@ class SipCall:
             # Handling remote hangup.  For an actual BYE request, send the
             # transaction 200 OK before firing application state callbacks or
             # doing local cleanup, so the provider sees call teardown promptly.
+            _hangup_log('CALL_REMOTE_BYE_BRANCH', self.call_id, is_incoming=self._is_incoming, dialogue_state=self.dialogue.state, data_starts_with_bye=str(msg.data).startswith("BYE"))
             if not str(msg.data).startswith("BYE"):
                 # Separating BYE requests from 200 OK responses to BYE.
                 await self.update_call_state(CallState.ENDED)
@@ -907,6 +930,7 @@ class SipCall:
             await self.sip_core.send(ok_message)
             self.dialogue.update_state(msg)
             await self.update_call_state(CallState.ENDED)
+            _hangup_log('CALL_REMOTE_BYE_STATE_ENDED', self.call_id, dialogue_state=self.dialogue.state)
             await self.stop("Callee hanged up")
 
         elif msg.method == "BYE" and msg.is_from_client(self.username):
