@@ -50,6 +50,51 @@ RTP_HEADER_LENGTH = 12
 RTP_PORT_RANGE = range(10_000, 20_000)
 SEND_SILENCE = True # send silence frames when no stream
 
+# --- RTP local-port allocation -------------------------------------------
+# Concurrent calls on the same account previously each did
+# random.choice(RTP_PORT_RANGE) with no shared record of in-use ports, so two
+# simultaneous calls could pick the same local RTP port. The second bind() then
+# failed (no SO_REUSEPORT) and broke that call's audio. This allocator hands out
+# ports that are (a) not already handed out in this process and (b) actually
+# bindable right now (probe bind), then records them until released on call
+# teardown. Advertised == bound because allocation happens before we build SDP.
+_rtp_used_ports = set()
+_rtp_port_lock = threading.Lock()
+
+
+def allocate_rtp_port(max_tries: int = 50) -> int:
+    """Reserve a currently-free local RTP port and return it.
+
+    Falls back to a plain random choice if no free port is found after
+    max_tries (extremely unlikely for a 10k-wide range) so behaviour never
+    regresses to a hard failure.
+    """
+    with _rtp_port_lock:
+        for _ in range(max_tries):
+            port = random.choice(RTP_PORT_RANGE)
+            if port in _rtp_used_ports:
+                continue
+            probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                probe.bind(('0.0.0.0', port))
+            except OSError:
+                probe.close()
+                continue
+            probe.close()
+            _rtp_used_ports.add(port)
+            return port
+        # Fallback: give back a random port without reservation.
+        port = random.choice(RTP_PORT_RANGE)
+        logger.log(logging.WARNING, f"allocate_rtp_port: no free port after {max_tries} tries, using {port} unreserved")
+        return port
+
+
+def release_rtp_port(port) -> None:
+    if port is None:
+        return
+    with _rtp_port_lock:
+        _rtp_used_ports.discard(port)
+
 
 def _env_int(name: str, default: int, minimum: int | None = None, maximum: int | None = None) -> int:
     try:

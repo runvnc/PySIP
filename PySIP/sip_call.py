@@ -13,7 +13,7 @@ from PySIP.utils import get_caller_number
 
 from .call_handler import CallHandler
 from .exceptions import SIPTransferException
-from .rtp_handler import RTP_PORT_RANGE, RTPClient, TransmitType
+from .rtp_handler import RTP_PORT_RANGE, RTPClient, TransmitType, allocate_rtp_port, release_rtp_port
 from .sip_core import Counter, DialogState, SipCore, SipDialogue, SipMessage
 from .filters import SIPCompatibleMethods, SIPStatus, CallState
 from .filters import SIPMessageType
@@ -119,6 +119,7 @@ class SipCall:
         self._last_auth_cseq = None  # Track which INVITE we authenticated
         self._preauth_enabled = False  # Set to True to pre-authenticate initial INVITE
         self._is_incoming = False  # Set to True for incoming calls
+        self._allocated_rtp_port = None  # Reserved local RTP port (released on stop)
 
     def _detach_sip_core_callbacks(self):
         """Remove this call's per-call SIP callbacks from the shared SipCore.
@@ -265,6 +266,12 @@ class SipCall:
         await self._cleanup_rtp()
         self._is_call_stopped = True
         self._detach_sip_core_callbacks()
+        # Release the reserved local RTP port back to the allocator so it can be
+        # reused by future calls on this account.
+        try:
+            release_rtp_port(self._allocated_rtp_port)
+        finally:
+            self._allocated_rtp_port = None
 
     async def handle_incoming_call(self, initial_invite: SipMessage):
         self._is_incoming = True
@@ -387,9 +394,13 @@ class SipCall:
             await asyncio.sleep(0.2)
 
     def setup_local_session(self):
+        # Reserve a collision-free local RTP port (see rtp_handler.allocate_rtp_port).
+        # Chosen here, before we build SDP, so the advertised port always equals
+        # the port we later bind in on_call_answered.
+        self._allocated_rtp_port = allocate_rtp_port()
         sdp = SipMessage.generate_sdp(
             self.sip_core.get_local_ip(),
-            random.choice(RTP_PORT_RANGE),
+            self._allocated_rtp_port,
             random.getrandbits(32),
             CODECS,
         )
@@ -711,10 +722,18 @@ class SipCall:
     def ok_generator(self, data_parsed: SipMessage, include_sdp=False):
         sdp = ""
         if include_sdp:
+            # Advertise the SAME local RTP port we will actually bind/listen on
+            # (dialogue.local_session_info, set in setup_local_session). Previously
+            # this generated a fresh random port, so the caller was told to send
+            # RTP to a port we were not listening on -> inbound audio only worked
+            # when the carrier did symmetric-RTP latching onto our source port.
+            local_info = self.dialogue.local_session_info
+            _sdp_port = local_info.port if local_info is not None else random.choice(RTP_PORT_RANGE)
+            _sdp_ssrc = local_info.ssrc if (local_info is not None and local_info.ssrc is not None) else random.getrandbits(32)
             sdp = SipMessage.generate_sdp(
-                self.sip_core.get_public_ip(),
-                random.choice(RTP_PORT_RANGE),
-                random.getrandbits(32),
+                self.my_public_ip or self.sip_core.get_public_ip(),
+                _sdp_port,
+                _sdp_ssrc,
                 CODECS,
             )
 
@@ -801,6 +820,30 @@ class SipCall:
         msg += "Content-Length: 0\r\n\r\n"
 
         return msg
+
+    def _bye_is_from_us(self, msg) -> bool:
+        """Tag-based direction check for BYE handling (replaces substring is_from_client for BYE only).
+
+        Any message WE originate carries our From-tag == dialogue.local_tag
+        (outbound INVITE From uses local_tag; every BYE we send uses
+        From;tag=local_tag via bye_generator, so the 200 OK to our BYE echoes
+        it). A BYE the far end originates carries their tag (== remote_tag), so
+        from_tag != local_tag. Direction-agnostic: local_tag is always our own
+        generated tag for BOTH inbound and outbound calls. Falls back to the
+        legacy substring test only when tags are missing.
+        """
+        our_tag = getattr(self.dialogue, 'local_tag', None)
+        from_tag = getattr(msg, 'from_tag', None)
+        if our_tag and from_tag:
+            from_us = (from_tag == our_tag)
+            _hangup_log('CALL_BYE_DIR_TAG', self.call_id,
+                        is_incoming=self._is_incoming, from_tag=from_tag,
+                        local_tag=our_tag, remote_tag=getattr(self.dialogue, 'remote_tag', None),
+                        from_us=from_us)
+            return from_us
+        legacy = msg.is_from_client(self.username)
+        _hangup_log('CALL_BYE_DIR_FALLBACK', self.call_id, from_us=legacy)
+        return legacy
 
     async def message_handler(self, msg: SipMessage):
         # In call events Handling
@@ -916,7 +959,7 @@ class SipCall:
             self.dialogue.auth_retry_count = 0  # reset the auth counter
             pass
 
-        elif msg.method == "BYE" and not msg.is_from_client(self.username):
+        elif msg.method == "BYE" and not self._bye_is_from_us(msg):
             # Handling remote hangup.  For an actual BYE request, send the
             # transaction 200 OK before firing application state callbacks or
             # doing local cleanup, so the provider sees call teardown promptly.
@@ -933,7 +976,7 @@ class SipCall:
             _hangup_log('CALL_REMOTE_BYE_STATE_ENDED', self.call_id, dialogue_state=self.dialogue.state)
             await self.stop("Callee hanged up")
 
-        elif msg.method == "BYE" and msg.is_from_client(self.username):
+        elif msg.method == "BYE" and self._bye_is_from_us(msg):
             await self.update_call_state(CallState.ENDED)
 
         elif msg.status == SIPStatus(487) and msg.method == "INVITE":
