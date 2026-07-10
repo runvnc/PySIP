@@ -642,7 +642,23 @@ class RTPClient:
                 pass  # Just use the payload as-is
 
             else:
-                logger.log(logging.WARNING, f"RTP send: Invalid payload size: {len(payload) if payload else 0}")
+                # 320-byte PCM16 is the normal pre-encode representation of a
+                # 20 ms frame (160 samples x 2 bytes). It is not an error. The
+                # old WARNING fired every 20 ms in PCM paths and could flood the
+                # process log badly enough to disturb real-time audio. Only
+                # report genuinely unexpected sizes, and only once per size.
+                payload_len = len(payload) if payload else 0
+                expected_len = 160 if pre_encoded_stream else 320
+                if payload_len != expected_len:
+                    warned = getattr(self, '_warned_invalid_payload_sizes', set())
+                    if payload_len not in warned:
+                        warned.add(payload_len)
+                        self._warned_invalid_payload_sizes = warned
+                        logger.log(
+                            logging.WARNING,
+                            f"RTP send: Invalid payload size: {payload_len} "
+                            f"(expected {expected_len}, pre_encoded={pre_encoded_stream})",
+                        )
 
             # if all frames are sent then continue
             if not payload:
