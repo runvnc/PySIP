@@ -4,6 +4,7 @@ from enum import Enum
 import logging
 import os
 #logging.disable(logging.CRITICAL)  # Disable ALL logging for performance testing
+from datetime import datetime
 import queue
 import random
 import socket
@@ -39,6 +40,23 @@ def _e2e_log(event: str, utterance_num: int = 0, **kwargs):
     line = f'[{ts}] [E2E] {event} perf_counter={pc:.6f} utterance={utterance_num} {extra}'
     try:
         with open(E2E_LATENCY_LOG, 'a') as f:
+            f.write(line + '\n')
+            f.flush()
+    except Exception:
+        pass
+
+
+HANGUP_LOG = '/tmp/sip_hangup.log'
+
+
+def _rtp_diag(event: str, call_id: str = '', **kwargs):
+    """Write focused RTP teardown/pressure diagnostics independent of logging."""
+    now = datetime.now()
+    ts = now.strftime('%Y-%m-%d %H:%M:%S') + f'.{now.microsecond // 1000:03d}'
+    extra = ' '.join(f'{k}={v}' for k, v in kwargs.items())
+    line = f'[{ts}] [HANGUP] {event} perf_counter={time.perf_counter():.6f} call_id={call_id or ""} {extra}'
+    try:
+        with open(HANGUP_LOG, 'a') as f:
             f.write(line + '\n')
             f.flush()
     except Exception:
@@ -260,6 +278,14 @@ class RTPClient:
         self.__dtmf_thread = None
         self.__all_threads: List[threading.Thread] = []
 
+        # Focused incoming-frame pressure counters. These are deliberately
+        # per RTP session and logged only on thresholds/stop.
+        self.__frame_scheduled = 0
+        self.__frame_consumed = 0
+        self.__frame_queue_max = 0
+        self.__frame_backlog_level = 0
+        self.__frame_slow_callbacks = 0
+
     async def _start(self):
         self.is_running.set()
         logger.log(
@@ -337,6 +363,14 @@ class RTPClient:
             self.__dtmf_thread.setName(f"Inband DTMF Thread - ({__dtmf_thread_id})")
 
     async def _stop(self): 
+        stop_started = time.perf_counter()
+        thread_states = ','.join(
+            f'{t.name}:{t.ident}:alive={t.is_alive()}' for t in self.__all_threads
+        )
+        _rtp_diag(
+            'RTP_STOP_BEGIN', self.call_id,
+            thread_count=len(self.__all_threads), threads=thread_states or 'none',
+        )
         self.is_running.clear()
         self.__rtp_socket.close() 
 
@@ -355,8 +389,30 @@ class RTPClient:
 
         # finally wait for threads to close
         logger.log(logging.DEBUG, "Closing all threads, TOTAL: %d", len(self.__all_threads))
+        survivors = []
         for t in self.__all_threads:
-            await asyncio.to_thread(t.join)
+            join_started = time.perf_counter()
+            _rtp_diag(
+                'RTP_JOIN_BEGIN', self.call_id,
+                thread_name=t.name, thread_id=t.ident, alive=t.is_alive(),
+            )
+            # A cancelled outer cleanup cannot stop a function already running
+            # in the shared executor. Bound the native join so one bad media
+            # thread cannot permanently consume an executor worker.
+            await asyncio.to_thread(t.join, 1.0)
+            elapsed_ms = (time.perf_counter() - join_started) * 1000.0
+            alive = t.is_alive()
+            _rtp_diag(
+                'RTP_JOIN_DONE', self.call_id,
+                thread_name=t.name, thread_id=t.ident,
+                elapsed_ms=f'{elapsed_ms:.1f}', alive=alive,
+            )
+            if alive:
+                survivors.append(f'{t.name}:{t.ident}')
+                _rtp_diag(
+                    'RTP_JOIN_SURVIVOR', self.call_id,
+                    thread_name=t.name, thread_id=t.ident,
+                )
 
         for recorder in (self.__incoming_recorder, self.__outgoing_recorder, self.__outgoing_input_recorder):
             if recorder:
@@ -364,6 +420,20 @@ class RTPClient:
                     await asyncio.to_thread(recorder.close)
                 except Exception:
                     logger.log(logging.WARNING, "Failed to close RTP diagnostic recorder", exc_info=True)
+        _rtp_diag(
+            'RTP_FRAME_SUMMARY', self.call_id,
+            scheduled=self.__frame_scheduled,
+            consumed=self.__frame_consumed,
+            current_qsize=self._output_queues.get('frame_monitor').qsize()
+                if isinstance(self._output_queues.get('frame_monitor'), asyncio.Queue) else 0,
+            max_qsize=self.__frame_queue_max,
+            slow_callbacks=self.__frame_slow_callbacks,
+        )
+        _rtp_diag(
+            'RTP_STOP_DONE', self.call_id,
+            elapsed_ms=f'{(time.perf_counter() - stop_started) * 1000.0:.1f}',
+            survivors=','.join(survivors) or 'none',
+        )
 
     async def _wait_stopped(self):
         while True:
@@ -814,6 +884,7 @@ class RTPClient:
                     # both .data and .timestamp (RTP timestamp in ticks).
                     if 'frame_monitor' in self._output_queues:
                         try:
+                            self.__frame_scheduled += 1
                             loop.call_soon_threadsafe(
                                 self._output_queues['frame_monitor'].put_nowait,
                                 encoded_frame,
@@ -850,6 +921,25 @@ class RTPClient:
     async def frame_monitor(self):
         # first add stream queue to the output _output_queues
         self._output_queues['frame_monitor'] = stream_q = asyncio.Queue()
+
+        def note_queue_pressure():
+            depth = stream_q.qsize()
+            self.__frame_queue_max = max(self.__frame_queue_max, depth)
+            threshold = None
+            if depth >= 100:
+                threshold = 100 + ((depth - 100) // 250) * 250
+            elif depth >= 25:
+                threshold = 25
+            if threshold is not None and threshold > self.__frame_backlog_level:
+                self.__frame_backlog_level = threshold
+                _rtp_diag(
+                    'RTP_FRAME_BACKLOG', self.call_id,
+                    qsize=depth, threshold=threshold,
+                    scheduled=self.__frame_scheduled,
+                    consumed=self.__frame_consumed,
+                    max_qsize=self.__frame_queue_max,
+                )
+
         while True:
             if not self.is_running.is_set():
                 break
@@ -860,11 +950,25 @@ class RTPClient:
                 frame = await stream_q.get()
                 if frame is None:
                     break
+                self.__frame_consumed += 1
+                note_queue_pressure()
                 if not (callbacks := self.__callbacks.get('frame_monitor')):
                     break
                 # check for registered callbacks
                 for cb in callbacks:
+                    callback_started = time.perf_counter()
                     await cb(frame)
+                    elapsed_ms = (time.perf_counter() - callback_started) * 1000.0
+                    if elapsed_ms > 100.0:
+                        self.__frame_slow_callbacks += 1
+                        _rtp_diag(
+                            'RTP_FRAME_CALLBACK_SLOW', self.call_id,
+                            callback=getattr(cb, '__qualname__', getattr(cb, '__name__', type(cb).__name__)),
+                            elapsed_ms=f'{elapsed_ms:.1f}',
+                            qsize=stream_q.qsize(),
+                            scheduled=self.__frame_scheduled,
+                            consumed=self.__frame_consumed,
+                        )
                 # No sleep for S2S - process frames immediately for real-time audio
                 # await asyncio.sleep(0.1)
 
