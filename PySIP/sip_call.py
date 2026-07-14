@@ -109,6 +109,10 @@ class SipCall:
         self._is_call_ongoing: Optional[asyncio.Event] = None
         self.__recorded_audio_bytes: Optional[bytes] = None
         self._is_call_stopped = False
+        # stop() can be reached concurrently from state callbacks, the agent,
+        # and session cleanup. Serialize the complete teardown so only one
+        # caller sends signaling, invokes callbacks, and stops RTP.
+        self._stop_lock = asyncio.Lock()
         self.dialogue = SipDialogue(self.call_id, self.sip_core.generate_tag(), "")
         self.call_state = CallState.INITIALIZING
         self.call_response_future: Optional[asyncio.Future] = None
@@ -197,81 +201,80 @@ class SipCall:
                     pass
 
     async def stop(self, reason: str = "Normal Stop"):
-        # we have to handle three different scenarious when hanged-up
-        # 1st its if the state was in predialog state, in this scenarious
-        # we just close connections and thats all.
-        # 2nd scenario is if the state is initial meaning the dialog is
-        # established but not yet confirmed, thus we send cancel.
-        # 3rd scenario is if the state is confirmed meaning the call was
-        # asnwered and in this scenario we send bye.
-        if self._is_call_stopped:
-            logger.log(
-                logging.WARNING,
-                "The call was already TERMINATED. stop call invoked more than once.",
-            )
-            return
-
-        if self.dialogue.state == DialogState.PREDIALOG:
-            if self.__sip_core is None:
-                self.sip_core.is_running.clear()
-                await self.sip_core.close_connections()
-            logger.info("The call has ben stopped")
-
-        elif (self.dialogue.state == DialogState.INITIAL) or (
-            self.dialogue.state == DialogState.EARLY
-        ):
-            # not that this will cancel using the latest transaction
-            transaction = self.dialogue.transactions[-1]
-            cancel_message = self.cancel_generator(transaction)
-            await self.sip_core.send(cancel_message)
-            try:
-                await asyncio.wait_for(
-                    self.dialogue.events[DialogState.TERMINATED].wait(), timeout=5
+        """Stop this call exactly once, even with concurrent callers."""
+        async with self._stop_lock:
+            if self._is_call_stopped:
+                logger.log(
+                    logging.WARNING,
+                    "The call was already TERMINATED. stop call invoked more than once.",
                 )
-                logger.log(logging.DEBUG, "The call has been cancelled")
-            except asyncio.TimeoutError:
-                logger.log(logging.WARNING, "The call has been cancelled with errors")
-            finally:
-                if self.__sip_core is None:
-                    self.sip_core.is_running.clear()
-                    await self.sip_core.close_connections()
+                return
 
-        elif self.dialogue.state == DialogState.CONFIRMED:
-            bye_message = self.bye_generator()
-            await self.sip_core.send(bye_message)
+            # Claim teardown before the first await. The lock serializes normal
+            # callers; the flag also makes state visible to frame/call handlers.
+            self._is_call_stopped = True
             try:
-                await asyncio.wait_for(
-                    self.dialogue.events[DialogState.TERMINATED].wait(), timeout=5
-                )
-                logger.log(logging.INFO, "The call has been hanged up")
-            except asyncio.TimeoutError:
-                logger.log(logging.WARNING, "The call has been hanged up with errors")
-            finally:
-                if self.__sip_core is None:
-                    self.sip_core.is_running.clear()
-                    await self.sip_core.close_connections()
+                if self.dialogue.state == DialogState.PREDIALOG:
+                    if self.__sip_core is None:
+                        self.sip_core.is_running.clear()
+                        await self.sip_core.close_connections()
+                    logger.info("The call has ben stopped")
 
-        elif self.dialogue.state == DialogState.TERMINATED:
-            if self.__sip_core is None:
-                self.sip_core.is_running.clear()
-                await self.sip_core.close_connections()
+                elif (self.dialogue.state == DialogState.INITIAL) or (
+                    self.dialogue.state == DialogState.EARLY
+                ):
+                    transaction = self.dialogue.transactions[-1]
+                    cancel_message = self.cancel_generator(transaction)
+                    await self.sip_core.send(cancel_message)
+                    try:
+                        await asyncio.wait_for(
+                            self.dialogue.events[DialogState.TERMINATED].wait(), timeout=5
+                        )
+                        logger.log(logging.DEBUG, "The call has been cancelled")
+                    except asyncio.TimeoutError:
+                        logger.log(logging.WARNING, "The call has been cancelled with errors")
+                    finally:
+                        if self.__sip_core is None:
+                            self.sip_core.is_running.clear()
+                            await self.sip_core.close_connections()
 
-        # finally notify the callbacks
-        for cb in self._get_callbacks("hanged_up_cb"):
-            logger.log(logging.DEBUG, f"The call has been hanged up due to: {reason}")
-            await cb(reason)
-        logger.log(logging.INFO, "Call hanged up due to: %s", reason)
+                elif self.dialogue.state == DialogState.CONFIRMED:
+                    bye_message = self.bye_generator()
+                    await self.sip_core.send(bye_message)
+                    try:
+                        await asyncio.wait_for(
+                            self.dialogue.events[DialogState.TERMINATED].wait(), timeout=5
+                        )
+                        logger.log(logging.INFO, "The call has been hanged up")
+                    except asyncio.TimeoutError:
+                        logger.log(logging.WARNING, "The call has been hanged up with errors")
+                    finally:
+                        if self.__sip_core is None:
+                            self.sip_core.is_running.clear()
+                            await self.sip_core.close_connections()
 
-        # also check for any rtp session and stop it
-        await self._cleanup_rtp()
-        self._is_call_stopped = True
-        self._detach_sip_core_callbacks()
-        # Release the reserved local RTP port back to the allocator so it can be
-        # reused by future calls on this account.
-        try:
-            release_rtp_port(self._allocated_rtp_port)
-        finally:
-            self._allocated_rtp_port = None
+                elif self.dialogue.state == DialogState.TERMINATED:
+                    if self.__sip_core is None:
+                        self.sip_core.is_running.clear()
+                        await self.sip_core.close_connections()
+
+                for cb in self._get_callbacks("hanged_up_cb"):
+                    logger.log(logging.DEBUG, f"The call has been hanged up due to: {reason}")
+                    await cb(reason)
+                logger.log(logging.INFO, "Call hanged up due to: %s", reason)
+
+                await self._cleanup_rtp()
+                self._detach_sip_core_callbacks()
+                try:
+                    release_rtp_port(self._allocated_rtp_port)
+                finally:
+                    self._allocated_rtp_port = None
+            except BaseException:
+                # Teardown is still claimed: retrying could send a duplicate
+                # CANCEL/BYE or invoke callbacks twice. Surface the failure to
+                # the original caller instead.
+                logger.log(logging.ERROR, "Call stop failed", exc_info=True)
+                raise
 
     async def handle_incoming_call(self, initial_invite: SipMessage):
         self._is_incoming = True
