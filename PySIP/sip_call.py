@@ -294,6 +294,12 @@ class SipCall:
         )
         self.dialogue.username = self.username
         self.dialogue._remote_session_info = SipMessage.parse_sdp(initial_invite.body)
+        # RFC 3261 dialog state for requests originated by this UAS. The
+        # caller's Contact is the remote target; Record-Route is the route set.
+        # Previously neither was retained, so local hangup fabricated a target
+        # from our own callee identity and routed the BYE back at the proxy.
+        self.dialogue.update_remote_contact(initial_invite.get_header("Contact"))
+        self.dialogue.update_route_set(initial_invite.get_header("Record-Route"), is_uas=True)
         self.setup_local_session()
 
         self.call_response_future = asyncio.Future()
@@ -649,19 +655,18 @@ class SipCall:
 
         branch_id = self.sip_core.gen_branch()
         transaction = self.dialogue.add_transaction(branch_id, "BYE")
-        request_uri = self.dialogue.remote_contact_uri or f"sip:{self.callee}@{peer_ip}:{peer_port};transport={self.CTS}"
+        remote_target = self.dialogue.remote_contact_uri
+        if not remote_target:
+            remote_user = self.caller_id if self._is_incoming else self.callee
+            remote_target = f"sip:{remote_user}@{peer_ip}:{peer_port};transport={self.CTS}"
 
-        msg = f"BYE {request_uri} SIP/2.0\r\n"
+        msg = f"BYE {remote_target} SIP/2.0\r\n"
         msg += (
             f"Via: SIP/2.0/{self.CTS} {self.my_public_ip}:{port};rport;"
             + f"branch={branch_id};alias\r\n"
         )
         msg += 'Reason: Q.850;cause=16;text="normal call clearing"\r\n'
         msg += "Max-Forwards: 70\r\n"
-        # In-dialog From/To must reflect our role. For an outgoing (UAC) call we
-        # are the caller; for an incoming (UAS) call we are the callee, so the
-        # local/remote URIs are reversed. Tags always pair local_tag(From)/
-        # remote_tag(To) for a request we originate.
         if self._is_incoming:
             local_user = self.username
             remote_user = self.caller_id
@@ -672,7 +677,10 @@ class SipCall:
         msg += f"To: sip:{remote_user}@{self.server};tag={self.dialogue.remote_tag}\r\n"
         msg += f"Call-ID: {self.call_id}\r\n"
         msg += f"CSeq: {transaction.cseq} BYE\r\n"
-        msg += f"Route: <{request_uri};lr>\r\n"
+        # Loose route set comes from Record-Route; never synthesize Route from
+        # Contact. Contact belongs in the Request-URI as the remote target.
+        for route_uri in self.dialogue.route_set:
+            msg += f"Route: <{route_uri}>\r\n"
         msg += "Content-Length: 0\r\n\r\n"
 
         return msg

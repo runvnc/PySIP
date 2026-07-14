@@ -473,6 +473,7 @@ class SipDialogue:
         self._local_session_info: Optional[SDPParser] = None
         self._remote_session_info: Optional[SDPParser] = None
         self.remote_contact_uri: Optional[str] = None
+        self.route_set: List[str] = []
 
     def matches(self, call_id, local_tag, remote_tag):
         # We now check if the provided identifiers match this dialogue's identifiers
@@ -545,10 +546,29 @@ class SipDialogue:
 
     def update_remote_contact(self, contact_header: str) -> None:
         if contact_header:
-            match = re.search(r'<(.+?)>', contact_header)
+            match = re.search(r'<([^>]+)>', contact_header)
             if match:
-                self.remote_contact_uri = match.group(1)
+                self.remote_contact_uri = match.group(1).strip()
                 logger.debug(f"Updated remote contact URI: {self.remote_contact_uri}")
+            else:
+                # Contact may legally omit angle brackets.
+                value = contact_header.split(';', 1)[0].strip()
+                if value.lower().startswith('sip:'):
+                    self.remote_contact_uri = value
+                logger.debug(f"Updated remote contact URI: {self.remote_contact_uri}")
+
+    def update_route_set(self, record_route_header: str, is_uas: bool) -> None:
+        """Store the dialog route set from Record-Route.
+
+        The parser preserves repeated Record-Route lines in one string. UAS
+        dialogs retain request order; UAC dialogs reverse response order.
+        """
+        if not record_route_header:
+            self.route_set = []
+            return
+        values = re.findall(r'<([^>]+)>', record_route_header)
+        self.route_set = values if is_uas else list(reversed(values))
+        logger.debug(f"Updated dialog route set: {self.route_set}")
 
     @property
     def local_session_info(self):
