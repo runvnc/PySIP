@@ -953,6 +953,12 @@ class SipCall:
                 self.sip_core.gen_branch(), "ACK"
             )
             self.dialogue.update_state(msg)
+            # For a UAC, the dialog route set is the reverse of the
+            # Record-Route sequence in the successful INVITE response. This
+            # keeps later ACK/BYE requests on the proxy path without reviving
+            # the old bug that synthesized Route from Contact.
+            self.dialogue.update_route_set(
+                msg.get_header("Record-Route"), is_uas=False)
             ack_message = self.ack_generator(transaction)
             self.dialogue.auth_retry_count = 0  # reset the auth counter
             await self.sip_core.send(ack_message)
